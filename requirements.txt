@@ -1,0 +1,7 @@
+pathlib
+pillow
+pandas
+matplotlib
+numpy
+scikit-learn
+tensorflow
