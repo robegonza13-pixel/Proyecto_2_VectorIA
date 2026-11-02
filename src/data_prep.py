@@ -11,15 +11,20 @@ class ExploracionLimpiezaImagenes:
     """Revisa la cantidad de imagenes, verificar duplicadas y corruptas.
     Atributos:
     ruta(Path): Ruta de la carpeta donde se almacenan las imagenes sin procesar
-    df_metadatos(Dataframe): Dataframe
+    df_metadatos(Dataframe): Inventario de las imagenes existentes con sus respectivas rutas
+    corrutas(Lista): Guarda ruta de imagen corrupta para excluirlas y registrarlas
+    duplicadas(Lista): Guarda ruta de imagen duplicada para excluirlas y registrarlas
     """
     def __init__(self, ruta):
+        """Inicializa la clase con la ruta de las imagenes crudas"""
         self.ruta = Path(ruta)
         self.df_metadatos = None
         self.corruptas = []
         self.duplicadas = []
 
     def auditor_imagenes(self):
+        """Recorre cada carpeta de especie, verifica que no esté corrupta, calcula su hash para ver que no este duplicada
+            y registra sus metadatos en un dataframe"""
         registros = []
         hashes_vistos = set()
         for clase in self.ruta.iterdir():
@@ -27,12 +32,12 @@ class ExploracionLimpiezaImagenes:
                 for imagen in clase.iterdir():
                     if imagen.is_file():
                         try:
-                            hash_archivo = hashlib.md5(imagen.read_bytes()).hexdigest()
+                            Image.open(imagen).verify() # Verificamos la integridad de la imagen
+                            hash_archivo = hashlib.md5(imagen.read_bytes()).hexdigest() # Se usa para detectar duplicado
                             if hash_archivo in hashes_vistos:
                                 self.duplicadas.append(imagen)
                             else:
-                                hashes_vistos.add(hash_archivo)
-                                img = Image.open(imagen)
+                                img = Image.open(imagen) #Otro open porque el verify deja el registro inutilizado
                                 ancho , alto = img.size
                                 modo = img.mode
                                 formato = img.format
@@ -44,7 +49,8 @@ class ExploracionLimpiezaImagenes:
                                     "modo": modo,
                                     "formato": formato
                                 })
-                        except Exception:
+                                hashes_vistos.add(hash_archivo)
+                        except Exception: # Cualquier fallo se toma como corrupta
                             self.corruptas.append(imagen)
 
         self.df_metadatos = pd.DataFrame(registros)
@@ -57,11 +63,15 @@ class ExploracionLimpiezaImagenes:
 
 
 class EdaImagenes:
+    """Realiza un analisis estadistico de con datos de las imagenes válidas
+        Atributos:
+        metadatos(Dataframe): Copia de dataset inventario de las imagenes existentes recibido"""
     def __init__(self, df_metadatos):
         self.df_metadatos = df_metadatos.copy()
         self.df_metadatos['aspect_ratio'] = self.df_metadatos['ancho'] / self.df_metadatos['alto']
 
     def reporte_estadistico_general(self):
+        """Se muestran estadisticos basicos del dataset recibido"""
         print(f"El dataset de cuenta con una cantidad de imagenes de:\n {self.df_metadatos['especie'].value_counts()}\n"
               f"Con un total de {len(self.df_metadatos)} imagenes \n")
         print(f"Porcentualmente corresponde a:\n {(self.df_metadatos['especie'].value_counts(normalize=True) * 100).round(2)}\n")
@@ -70,6 +80,7 @@ class EdaImagenes:
         print(f"El promedio de las dimensiones global es de: \n{(self.df_metadatos[['alto', 'ancho']].mean()).astype(int)}\n")
 
     def graficar_distribucion_clases(self):
+
         plt.figure(figsize=(8, 5))
 
         conteos = self.df_metadatos['especie'].value_counts()
@@ -132,6 +143,15 @@ class EdaImagenes:
         plt.show()
 
 class DivisorDatos:
+    """Divide datos procesados en train, test y val y guarda en el disco los datos divididos
+        Atributos:
+            df_metadatos(Dataframe): Inventario de imagenes recibido
+            ruta_salida(Path): Ruta de la carpeta donde se almacenan las imagenes procesadas
+            seed(int): Semilla para recrear division y dar trazabilidad
+            train_df(Dataframe): Inventario de imagenes de entrenamiento
+            val_df(Dataframe): Inventario de imagenes de validacion
+            test_df(Dataframe): Inventario de imagenes de test"""
+
     def __init__(self, df_metadatos, ruta_salida, seed=42):
         self.df_metadatos = df_metadatos
         self.ruta_salida = Path(ruta_salida)
@@ -142,16 +162,17 @@ class DivisorDatos:
         self.test_df = None
 
     def dividir_datos(self):
+        """Se dividen los datos en entrenamientos, test y validacion"""
         self.train_df, temp_df = train_test_split(
             self.df_metadatos,
-            test_size=0.2,
+            test_size=0.2, # Se dividen los datos en 80/20
             stratify=self.df_metadatos['especie'],
             random_state=self.seed
         )
 
         self.val_df, self.test_df = train_test_split(
             temp_df,
-            test_size=0.50,
+            test_size=0.50, # El 20% restante se dividen 50/50 para validacion y test
             stratify=temp_df['especie'],
             random_state=self.seed
         )
@@ -162,6 +183,7 @@ class DivisorDatos:
         print(f"  - Test:  {len(self.test_df)} imágenes ({len(self.test_df) / len(self.df_metadatos) * 100:.1f}%)")
 
     def copiar_a_disco(self):
+        """Guarda en disco los datos divididos en la ruta processed"""
         conjuntos = [
             ('train', self.train_df),
             ('val', self.val_df),
