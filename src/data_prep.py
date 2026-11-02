@@ -4,11 +4,15 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import hashlib
 import shutil
-import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.utils.class_weight import compute_class_weight
+
 
 class ExploracionLimpiezaImagenes:
+    """Revisa la cantidad de imagenes, verificar duplicadas y corruptas.
+    Atributos:
+    ruta(Path): Ruta de la carpeta donde se almacenan las imagenes sin procesar
+    df_metadatos(Dataframe): Dataframe
+    """
     def __init__(self, ruta):
         self.ruta = Path(ruta)
         self.df_metadatos = None
@@ -97,9 +101,9 @@ class EdaImagenes:
         plt.figure(figsize=(8, 5))
         plt.hist(
             self.df_metadatos['aspect_ratio'],
-            bins=30,  # Agrupa en 30 barras
+            bins=30,
             color='#2b5c8f',
-            edgecolor='black',  # Borde negro para que se distingan las barras
+            edgecolor='black',
             alpha=0.7
         )
         plt.axvline(1.0, color='red', linestyle='--', linewidth=2, label='Aspecto Cuadrado (1:1)')
