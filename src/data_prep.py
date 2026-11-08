@@ -19,7 +19,7 @@ class AuditorDataset:
         self.mal_iluminadas = []
         self.df_metadatos = None
 
-    def auditor_imagenes(self, min_res=100, umbral_borrosidad=80.0, umbral_oscuro=15.0, umbral_claro=240.0):
+    def auditor_imagenes(self, min_res=100, umbral_borrosidad=30.0, umbral_oscuro=15.0, umbral_claro=240.0):
         """Audita el dataset filtrando imágenes corruptas, duplicadas, pequeñas o con mala iluminación."""
         registros = []
         hashes_vistos = set()

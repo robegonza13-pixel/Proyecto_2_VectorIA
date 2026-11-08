@@ -185,24 +185,29 @@ class EntrenarMobileNetV2:
         print("✓ Fase 1 completada exitosamente.")
         return self.historia_fase1
 
-    def entrenar_fine_tuning(self, epochs_adicionales=15, capas_a_descongelar=40, class_weights=None):
-        """Fase 2: Descongela las capas superiores de MobileNetV2 y entrena con learning rate muy bajo"""
+    def entrenar_fine_tuning(self, epochs_adicionales=20, capas_a_descongelar=40, class_weights=None):
+        """Fase 2: Descongela las capas superiores de MobileNetV2 protegiendo el Batch Normalization"""
         Path('models').mkdir(parents=True, exist_ok=True)
         print("\n" + "=" * 60)
         print(f"FASE 2: FINE-TUNING (Descongelando últimas {capas_a_descongelar} capas)")
         print("=" * 60)
 
-        # 1. Habilitamos entrenamiento en base_model y volvemos a congelar las capas mas tempranas
+        # 1. Habilitamos entrenamiento en base_model y volvemos a congelar las capas más tempranas
         self.base_model.trainable = True
         for capa in self.base_model.layers[:-capas_a_descongelar]:
             capa.trainable = False
 
-        entrenables = sum(1 for c in self.base_model.layers if c.trainable)
-        print(f"Capas entrenables en base_model: {entrenables} de {len(self.base_model.layers)}")
+        # REGLA DE ORO: Nunca descongelar BatchNormalization en Fine-Tuning para no destruir estadísticas previas
+        for capa in self.base_model.layers:
+            if isinstance(capa, keras.layers.BatchNormalization):
+                capa.trainable = False
 
-        # 2. Recompilamos con Learning Rate muy pequeno (5e-6) para no destruir las caracteristicas de ImageNet
+        entrenables = sum(1 for c in self.base_model.layers if c.trainable)
+        print(f"Capas entrenables en base_model: {entrenables} (Excluyendo BatchNormalization)")
+
+        # 2. Recompilamos con Learning Rate del 10% respecto a la Fase 1 (1e-4)
         self.modelo.compile(
-            optimizer=keras.optimizers.Adam(learning_rate=5e-6),
+            optimizer=keras.optimizers.Adam(learning_rate=1e-4),
             loss=keras.losses.CategoricalCrossentropy(label_smoothing=0.05),
             metrics=[
                 "accuracy",
@@ -213,23 +218,24 @@ class EntrenarMobileNetV2:
         )
 
         callbacks = [
-            # Paciencia extendida a 5 para permitir que el ajuste fino converja gradualmente
+            # Paciencia extendida a 8 para permitir que el ajuste fino micro-converja sin cortarse
             keras.callbacks.EarlyStopping(
                 monitor='val_f1_macro',
                 mode='max',
-                patience=5,
+                patience=8,
                 restore_best_weights=True,
                 verbose=1
             ),
+            # Reductor de tasa de aprendizaje más tolerante
             keras.callbacks.ReduceLROnPlateau(
                 monitor='val_f1_macro',
                 mode='max',
                 factor=0.5,
-                patience=2,
-                min_lr=1e-7,
+                patience=3,
+                min_lr=1e-6,
                 verbose=1
             ),
-            # Guarda el modelo definitivo listo para produccion
+            # Guarda el modelo definitivo listo para producción
             keras.callbacks.ModelCheckpoint(
                 filepath='models/mobilenetv2_final.keras',
                 monitor='val_f1_macro',
@@ -239,7 +245,7 @@ class EntrenarMobileNetV2:
             )
         ]
 
-        # Continuamos el contador de epocas desde el final de la Fase 1
+        # Continuamos el contador de épocas desde el final de la Fase 1
         epoca_inicial = len(self.historia_fase1.history['loss']) if self.historia_fase1 else 0
         total_epocas = epoca_inicial + epochs_adicionales
 

@@ -67,53 +67,62 @@ class EntrenarCNN:
         self.test_ds = self.test_ds.prefetch(buffer_size=AUTOTUNE)
 
     def construir_modelo(self):
-        """Construye las capas del modelo CNN devolviendo el modelo listo para compilar"""
-        self.modelo = keras.Sequential([
-            layers.Input(shape=(self.img_size[0], self.img_size[1], 3)),
+        """Construye el modelo V6 optimizado con Bloques de Atención (Squeeze-and-Excitation)"""
+        entradas = layers.Input(shape=(self.img_size[0], self.img_size[1], 3))
 
-            # Data Augmentation integrado en el modelo para evitar memorizacion y sobreajuste
-            layers.RandomFlip("horizontal_and_vertical"),
-            layers.RandomRotation(factor=0.5),
-            layers.RandomZoom(height_factor=(-0.1, 0.1)),
-            layers.RandomTranslation(height_factor=0.05, width_factor=0.05),
+        # 1. Data Augmentation Sutil
+        x = layers.RandomFlip("horizontal_and_vertical")(entradas)
+        x = layers.RandomRotation(factor=0.2)(x)
+        x = layers.RandomZoom(height_factor=(-0.1, 0.1))(x)
+        x = layers.RandomTranslation(height_factor=0.05, width_factor=0.05)(x)
+        x = layers.Rescaling(1. / 255)(x)
 
+        # FUNCIÓN AUXILIAR: Bloque Squeeze-and-Excitation (Atención)
+        def bloque_atencion(tensor, ratio=16):
+            filtros = tensor.shape[-1]
+            # Squeeze: Aplasta la imagen para sacar estadísticas globales
+            se = layers.GlobalAveragePooling2D()(tensor)
+            se = layers.Reshape((1, 1, filtros))(se)
+            # Excitation: Calcula qué características (filtros) son las más importantes
+            se = layers.Dense(filtros // ratio, activation='relu', use_bias=False)(se)
+            se = layers.Dense(filtros, activation='sigmoid', use_bias=False)(se)
+            # Multiplica la imagen original por su mapa de importancia
+            return layers.Multiply()([tensor, se])
 
-            # Normalizacion de pixeles (0 a 255 -> 0.0 a 1.0) dentro de la red para que sea portable
-            layers.Rescaling(1. / 255),
+        # 2. Bloque Convolucional 1
+        x = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(x)
+        x = layers.BatchNormalization()(x)
+        x = bloque_atencion(x)  # <-- ATENCIÓN APLICADA AQUÍ
+        x = layers.MaxPooling2D((2, 2))(x)
 
-            # Bloque Convolucional 1: Extraccion de bordes y caracteristicas iniciales
-            layers.Conv2D(32, (3, 3), activation='relu', padding='same'),
-            layers.BatchNormalization(),
-            layers.Conv2D(32, (3, 3), activation='relu', padding='same'),
-            layers.BatchNormalization(),
-            layers.MaxPooling2D((2, 2)),
+        # 3. Bloque Convolucional 2
+        x = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(x)
+        x = layers.BatchNormalization()(x)
+        x = bloque_atencion(x)  # <-- ATENCIÓN APLICADA AQUÍ
+        x = layers.MaxPooling2D((2, 2))(x)
 
-            # Bloque Convolucional 2: Detecta formas intermedias y texturas
-            layers.Conv2D(64, (3, 3), activation='relu', padding='same'),
-            layers.BatchNormalization(),
-            layers.Conv2D(64, (3, 3), activation='relu', padding='same'),
-            layers.BatchNormalization(),
-            layers.MaxPooling2D((2, 2)),
+        # 4. Bloque Convolucional 3
+        x = layers.Conv2D(256, (3, 3), activation='relu', padding='same')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Conv2D(256, (3, 3), activation='relu', padding='same')(x)
+        x = layers.BatchNormalization()(x)
+        x = bloque_atencion(x)  # <-- ATENCIÓN APLICADA AQUÍ
+        x = layers.MaxPooling2D((2, 2))(x)
 
-            # Bloque Convolucional 3: Captura partes del cuerpo y patrones de escamas
-            layers.Conv2D(128, (3, 3), activation='relu', padding='same'),
-            layers.BatchNormalization(),
-            layers.Conv2D(128, (3, 3), activation='relu', padding='same'),
-            layers.BatchNormalization(),
-            layers.MaxPooling2D((2, 2)),
+        # 5. Capa de Decisión (Liberando la memoria tras la atención)
+        x = layers.GlobalAveragePooling2D()(x)
+        x = layers.Dense(256, activation='relu')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Dropout(0.3)(x)
 
-            # Promedia espacialmente cada mapa de caracteristicas reduciendo drásticamente parametros frente a Flatten
-            layers.GlobalAveragePooling2D(),
+        # Salida
+        salidas = layers.Dense(3, activation='softmax')(x)
 
-            # Capa densa de interpretacion
-            layers.Dense(128, activation='relu'),
-            layers.BatchNormalization(),
-            layers.Dropout(0.5),  # Apaga neuronas al azar para forzar representaciones redundantes
-
-            # Capa de salida: 3 neuronas con softmax que entregan probabilidades para cada especie
-            layers.Dense(3, activation='softmax')
-        ], name="CNN_Mosquitos_Propia")
-
+        self.modelo = keras.Model(inputs=entradas, outputs=salidas, name="CNN_V6_Con_Atencion")
         self.modelo.summary()
         return self.modelo
 
@@ -135,7 +144,7 @@ class EntrenarCNN:
         self.modelo.compile(
             optimizer=keras.optimizers.Adam(learning_rate=1e-4),
             # Label smoothing ayuda cuando hay clases muy similares (evita confianza extrema)
-            loss=keras.losses.CategoricalCrossentropy(label_smoothing=0.05),
+            loss=keras.losses.CategoricalCrossentropy(label_smoothing=0.1),
             metrics=[
                 "accuracy",
                 keras.metrics.Precision(name="precision"),
@@ -149,7 +158,7 @@ class EntrenarCNN:
             keras.callbacks.EarlyStopping(
                 monitor='val_f1_macro',
                 mode='max',
-                patience=7,
+                patience=15,
                 restore_best_weights=True,
                 verbose=1
             ),
@@ -158,7 +167,7 @@ class EntrenarCNN:
                 monitor='val_f1_macro',
                 mode='max',
                 factor=0.5,
-                patience=3,
+                patience=6,
                 min_lr=1e-6,
                 verbose=1
             ),
