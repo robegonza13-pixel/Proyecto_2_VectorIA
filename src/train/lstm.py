@@ -26,12 +26,12 @@ class LstmModel:
         self.model_rnn = None
         self.model_lstm = None
 
-    def preparar_datos(self, df, test_size=52):
+    def preparar_datos(self, df, test_size=104, usar_lags = True):
         # se prepara un dataframe: creando rezagos del clima y variables temporales
-        df = df.sort_values('fecha_inicio_semana').reset_index(drop=True)
+        self.df = df.sort_values('fecha_inicio_semana').reset_index(drop=True).copy()
 
-        # se asegura el formato de la fecha sea date para extraer los componentes
-        df['fecha_inicio_semana'] = pd.to_datetime(df['fecha_inicio_semana'])
+        # asegura el formato de la fecha sea date para extraer los componentes
+        self.df['fecha_inicio_semana'] = pd.to_datetime(df['fecha_inicio_semana'])
 
         # se crea un componente temporal donde se verifica si cumple la instruccion de usar la fecha
         if 'semana_epi' in df.columns:
@@ -39,12 +39,13 @@ class LstmModel:
             df['semana_cos'] = np.cos(2 * np.pi * df['semana_epi'] / 52.0)
 
         # se crean los rezagos del clima y selecciona las columnas del csv que tienen relación
-        features_to_lag = ['lluvia_mm', 'temp_max_c', 'temp_min_c', 'humedad_rel_pct']
-        for col in features_to_lag:
-            for lag in [1, 2, 3, 4]:
-                df[f'{col}_lag{lag}'] = df[col].shift(lag)
+        if usar_lags:
+            features_to_lag = ['lluvia_mm', 'temp_max_c', 'temp_min_c', 'humedad_rel_pct']
+            for col in features_to_lag:
+                for lag in [1, 2, 3, 4]:
+                    df[f'{col}_lag{lag}'] = df[col].shift(lag)
 
-        df = df.dropna().reset_index(drop=True)
+        self.df = df.dropna().reset_index(drop=True)
 
         # se definen las columnas de entrada
         base_cols = ['casos_dengue', 'lluvia_mm', 'temp_max_c', 'temp_min_c', 'humedad_rel_pct']
@@ -77,10 +78,10 @@ class LstmModel:
 
         return np.array(x), np.array(y)
 
-    def entrenar(self, scaled_train, scaled_test, epochs=40, batch_size=16):
+    def entrenar(self, scaled_train, scaled_test, epochs=100, batch_size=16):
         # Se encarga de contruir y entrenar el modelo
-        X_train, y_train = self.crear_secuencias(scaled_train)
-        X_test, y_test = self.crear_secuencias(scaled_test)
+        x_train, y_train = self.crear_secuencias(scaled_train)
+        x_test, y_test = self.crear_secuencias(scaled_test)
 
         n_features = scaled_train.shape[1]
         early_stop = EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True)
@@ -92,8 +93,8 @@ class LstmModel:
              Dense(self.horizon)])
 
         self.model_rnn.compile(optimizer='adam', loss='mse')
-        self.model_rnn.fit(X_train, y_train, epochs=epochs, batch_size=batch_size,
-                            validation_data=(X_test, y_test), callbacks=[early_stop], verbose=1)
+        self.model_rnn.fit(x_train, y_train, epochs=epochs, batch_size=batch_size,
+                            validation_data=(X_test, y_test), callbacks=[early_stop], verbose=0)
 
         # modelo principal: LSTM
         print("Entrenamiento del modelo LSTM")
@@ -107,12 +108,14 @@ class LstmModel:
         self.model_lstm.compile(optimizer='adam', loss='mse')
         early_stop = EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True)
 
-        history_lstm = self.model_lstm.fit( X_train, y_train, epochs=epochs, batch_size=batch_size,
-            validation_data=(X_test, y_test), callbacks=[early_stop], verbose=1)
+        history_lstm = self.model_lstm.fit(x_train, y_train, epochs=epochs, batch_size=batch_size,
+            validation_data=(x_test, y_test), callbacks=[early_stop], verbose=0)
+
+        print("Entrenamiento finalizado con éxito")
 
         return history_lstm
 
-    def evaluar_metricas(self, scaled_test):
+    def evaluar_metricas(self, scaled_test, test_size=104):
         # calcula las métricas rmse y mae
         x_test, y_test_scaled = self.crear_secuencias(scaled_test)
 
@@ -137,10 +140,20 @@ class LstmModel:
         # se realiza construyendo un array de baseline estacional para el test set
         y_baseline_estacional = np.zeros_like(y_true)
 
-        for i in range(len(y_true)):
+        total_len = len(self.df)
+        test_start_idx = total_len - test_size
 
-            if  i >= 52:
-                y_baseline_estacional[i] =  y_true[i - 52]
+        for i in range(len(y_true)):
+            # indice de la semana actual dentro del dataframe
+            # al crear secuencias, el primer target empieza en test_start_idx
+            abs_idx = test_start_idx + self.length + i
+
+            #buscamos los casos de 52 semanas (1 año) antes
+            target_historical_idx = abs_idx - 52
+
+            if  i >=0:
+                # tomamos un bloque de 4 semanas de un añp atras
+                y_baseline_estacional[i] =  self.df['casos_dengue'].iloc[target_historical_idx : target_historical_idx + self.horizon].values
             else:
                 y_baseline_estacional[i] = y_true[0]
 
@@ -175,7 +188,7 @@ class LstmModel:
     def predecir_semanas(self, ultimos_datos_scaled):
         #predice las próximas 4 semanas utilizando el modelo principal
         batch_actual = ultimos_datos_scaled[-self.length:].reshape((1, self.length, len(self.feature_cols)))
-        pred_scaled = self.model.predict(batch_actual)[0]
+        pred_scaled = self.model_lstm.predict(batch_actual)[0]
 
         # Desescalar la salida de las 4 semanas de casos de dengue
         dummy = np.zeros((self.horizon, len(self.feature_cols)))
