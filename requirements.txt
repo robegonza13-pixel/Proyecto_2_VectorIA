@@ -5,3 +5,7 @@ matplotlib
 numpy
 scikit-learn
 tensorflow
+opencv-python
+pydantic
+joblib
+fastapi

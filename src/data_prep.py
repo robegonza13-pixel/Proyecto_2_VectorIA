@@ -1,86 +1,120 @@
-from pathlib import Path
-from PIL import Image
-import pandas as pd
 import matplotlib.pyplot as plt
-import hashlib
 import shutil
 from sklearn.model_selection import train_test_split
+import hashlib
+from pathlib import Path
+import cv2
+import numpy as np
+import pandas as pd
+from PIL import Image
+import traceback  # Herramienta para detectar la línea exacta del error
 
-
-class ExploracionLimpiezaImagenes:
-    """Revisa la cantidad de imagenes, verificar duplicadas y corruptas.
-    Atributos:
-    ruta(Path): Ruta de la carpeta donde se almacenan las imagenes sin procesar
-    df_metadatos(Dataframe): Inventario de las imagenes existentes con sus respectivas rutas
-    corrutas(Lista): Guarda ruta de imagen corrupta para excluirlas y registrarlas
-    duplicadas(Lista): Guarda ruta de imagen duplicada para excluirlas y registrarlas
-    """
-    def __init__(self, ruta):
-        """Inicializa la clase con la ruta de las imagenes crudas"""
-        self.ruta = Path(ruta)
-        self.df_metadatos = None
-        self.corruptas = []
+class AuditorDataset:
+    def __init__(self, ruta_dataset):
+        self.ruta = Path(ruta_dataset)
         self.duplicadas = []
+        self.corruptas = []
+        self.pequenas = []
+        self.borrosas = []
+        self.mal_iluminadas = []
+        self.df_metadatos = None
 
-    def auditor_imagenes(self):
-        """Recorre cada carpeta de especie, verifica que no esté corrupta, calcula su hash para ver que no este duplicada
-            y registra sus metadatos en un dataframe"""
+    def auditor_imagenes(self, min_res=100, umbral_borrosidad=80.0, umbral_oscuro=15.0, umbral_claro=240.0):
+        """Audita el dataset filtrando imágenes corruptas, duplicadas, pequeñas o con mala iluminación."""
         registros = []
         hashes_vistos = set()
+
         for clase in self.ruta.iterdir():
             if clase.is_dir():
                 for imagen in clase.iterdir():
                     if imagen.is_file():
                         try:
-                            Image.open(imagen).verify() # Verificamos la integridad de la imagen
-                            hash_archivo = hashlib.md5(imagen.read_bytes()).hexdigest() # Se usa para detectar duplicado
+                            # 1. Integridad estructural y liberación de RAM
+                            with Image.open(imagen) as img_temp:
+                                img_temp.verify()
+
+                            # 2. Duplicados exactos
+                            hash_archivo = hashlib.md5(imagen.read_bytes()).hexdigest()
                             if hash_archivo in hashes_vistos:
                                 self.duplicadas.append(imagen)
-                            else:
-                                img = Image.open(imagen) #Otro open porque el verify deja el registro inutilizado
-                                ancho , alto = img.size
-                                modo = img.mode
-                                formato = img.format
-                                registros.append({
-                                    "ruta": str(imagen),
-                                    "especie": clase.name,
-                                    "ancho": ancho,
-                                    "alto": alto,
-                                    "modo": modo,
-                                    "formato": formato
-                                })
-                                hashes_vistos.add(hash_archivo)
-                        except Exception: # Cualquier fallo se toma como corrupta
+                                continue
+
+                            # 3. Extracción de dimensiones y resolución mínima
+                            with Image.open(imagen) as img_abierta:
+                                img_pil = img_abierta.convert('RGB')
+                                ancho, alto = img_pil.size
+
+                            if ancho < min_res or alto < min_res:
+                                self.pequenas.append(imagen)
+                                continue
+
+                            # Convertir a OpenCV solo para evaluar calidad visual (borrosidad/luz)
+                            img_cv = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+                            gris = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+
+                            # 4. Filtro de Borrosidad
+                            borrosidad = cv2.Laplacian(gris, cv2.CV_64F).var()
+                            if borrosidad < umbral_borrosidad:
+                                self.borrosas.append(imagen)
+                                continue
+
+                            # 5. Filtro de Iluminación extrema
+                            iluminacion = np.mean(gris)
+                            if iluminacion < umbral_oscuro or iluminacion > umbral_claro:
+                                self.mal_iluminadas.append(imagen)
+                                continue
+
+                            # Guardamos los metadatos de la imagen original válida
+                            registros.append({
+                                "ruta": str(imagen),
+                                "especie": clase.name,
+                                "ancho_original": ancho,
+                                "alto_original": alto,
+                                "ancho_recorte": ancho,  # Mantenemos la llave para no romper la clase EdaImagenes
+                                "alto_recorte": alto,    # Mantenemos la llave para no romper la clase EdaImagenes
+                                "borrosidad": round(borrosidad, 2),
+                                "iluminacion": round(iluminacion, 2)
+                            })
+                            hashes_vistos.add(hash_archivo)
+
+                        except Exception as e:
+                            print(f"\n❌ Error DETECTADO en la imagen {imagen.name}: {e}")
+                            traceback.print_exc()
                             self.corruptas.append(imagen)
+                            break
 
         self.df_metadatos = pd.DataFrame(registros)
-        print(f"✓ Auditoría finalizada:")
-        print(f"  - Imágenes válidas: {len(self.df_metadatos)}")
-        print(f"  - Duplicadas detectadas: {len(self.duplicadas)}")
-        print(f"  - Corruptas detectadas: {len(self.corruptas)}")
+
+        print(f"✓ Auditoría finalizada (Sin recortes artificiales):")
+        print(f"  - Imágenes válidas para entrenar: {len(self.df_metadatos)}")
+        print(f"  - Descartadas (Corruptas: {len(self.corruptas)} | Duplicadas: {len(self.duplicadas)} | Pequeñas: {len(self.pequenas)} | Borrosas: {len(self.borrosas)} | Luz extrema: {len(self.mal_iluminadas)})")
 
         return self.df_metadatos
 
-
 class EdaImagenes:
-    """Realiza un analisis estadistico de con datos de las imagenes válidas
-        Atributos:
-        metadatos(Dataframe): Copia de dataset inventario de las imagenes existentes recibido"""
+    """Realiza un analisis estadistico y visual con los datos de las imagenes validas
+    Atributos:
+        df_metadatos (DataFrame): Copia del inventario de imagenes limpias
+    """
+
     def __init__(self, df_metadatos):
         self.df_metadatos = df_metadatos.copy()
-        self.df_metadatos['aspect_ratio'] = self.df_metadatos['ancho'] / self.df_metadatos['alto']
+        # Calculamos la relacion de aspecto (ancho/alto) para evaluar deformaciones al reescalar
+        self.df_metadatos['aspect_ratio'] = self.df_metadatos['ancho_recorte'] / self.df_metadatos['alto_recorte']
 
     def reporte_estadistico_general(self):
         """Se muestran estadisticos basicos del dataset recibido"""
-        print(f"El dataset de cuenta con una cantidad de imagenes de:\n {self.df_metadatos['especie'].value_counts()}\n"
+        print(f"El dataset cuenta con una cantidad de imagenes de:\n {self.df_metadatos['especie'].value_counts()}\n"
               f"Con un total de {len(self.df_metadatos)} imagenes \n")
-        print(f"Porcentualmente corresponde a:\n {(self.df_metadatos['especie'].value_counts(normalize=True) * 100).round(2)}\n")
-        print(f"El conteo de canales es de {self.df_metadatos['modo'].value_counts()}\n")
-        print(f"El promedio de las dimensiones por clase es de: {(self.df_metadatos.groupby('especie')[['alto', 'ancho']].mean()).astype(int)}\n")
-        print(f"El promedio de las dimensiones global es de: \n{(self.df_metadatos[['alto', 'ancho']].mean()).astype(int)}\n")
+        print(
+            f"Porcentualmente corresponde a:\n {(self.df_metadatos['especie'].value_counts(normalize=True) * 100).round(2)}\n")
+        print(
+            f"El promedio de las dimensiones por clase es de:\n {(self.df_metadatos.groupby('especie')[['alto_recorte', 'ancho_recorte']].mean()).astype(int)}\n")
+        print(
+            f"El promedio de las dimensiones global es de: \n{(self.df_metadatos[['alto_recorte', 'ancho_recorte']].mean()).astype(int)}\n")
 
     def graficar_distribucion_clases(self):
-
+        """Grafico de barras para visualizar el balance de clases de mosquitos"""
         plt.figure(figsize=(8, 5))
 
         conteos = self.df_metadatos['especie'].value_counts()
@@ -95,11 +129,12 @@ class EdaImagenes:
         plt.show()
 
     def graficar_dimensiones(self):
+        """Diagrama de dispersion para ver que tan dispersas estan las resoluciones"""
         plt.figure(figsize=(8, 6))
         plt.scatter(
-            self.df_metadatos['ancho'],
-            self.df_metadatos['alto'],
-            alpha=0.4,  # alpha le da transparencia a los puntos para ver dónde se amontonan
+            self.df_metadatos['ancho_recorte'],
+            self.df_metadatos['alto_recorte'],
+            alpha=0.4,
             color='#2b5c8f'
         )
         plt.title("Distribución de Dimensiones de las Imágenes (Ancho vs Alto)")
@@ -109,6 +144,7 @@ class EdaImagenes:
         plt.show()
 
     def graficar_relacion_aspecto(self):
+        """Histograma para comprobar si la mayoria son cuadradas (1.0) o panoramicas"""
         plt.figure(figsize=(8, 5))
         plt.hist(
             self.df_metadatos['aspect_ratio'],
@@ -121,11 +157,12 @@ class EdaImagenes:
         plt.title("Distribución de la Relación de Aspecto (Ancho / Alto)")
         plt.xlabel("Relación de Aspecto")
         plt.ylabel("Frecuencia")
-        plt.legend()  # Para que se vea qué significa la línea roja
+        plt.legend()
         plt.grid(True, linestyle='--', alpha=0.5)
         plt.show()
 
     def mostrar_galeria(self, n_por_clase=3):
+        """Muestra una muestra aleatoria de imagenes por clase para inspeccion visual"""
         especies = self.df_metadatos['especie'].unique()
         filas = len(especies)
         columnas = n_por_clase
@@ -137,20 +174,14 @@ class EdaImagenes:
                 ax = axes[i, j]
                 img = Image.open(fila['ruta'])
                 ax.imshow(img)
-                ax.set_title(f"{especie}\n{fila['ancho']}x{fila['alto']} px", fontsize=10)
+                ax.set_title(f"{especie}\n{fila['ancho_recorte']}x{fila['alto_recorte']} px", fontsize=10)
                 ax.axis('off')
         plt.tight_layout()
         plt.show()
 
+
 class DivisorDatos:
-    """Divide datos procesados en train, test y val y guarda en el disco los datos divididos
-        Atributos:
-            df_metadatos(Dataframe): Inventario de imagenes recibido
-            ruta_salida(Path): Ruta de la carpeta donde se almacenan las imagenes procesadas
-            seed(int): Semilla para recrear division y dar trazabilidad
-            train_df(Dataframe): Inventario de imagenes de entrenamiento
-            val_df(Dataframe): Inventario de imagenes de validacion
-            test_df(Dataframe): Inventario de imagenes de test"""
+    """Divide datos en train, val y test de forma estratificada y copia a disco"""
 
     def __init__(self, df_metadatos, ruta_salida, seed=42):
         self.df_metadatos = df_metadatos
@@ -162,17 +193,17 @@ class DivisorDatos:
         self.test_df = None
 
     def dividir_datos(self):
-        """Se dividen los datos en entrenamientos, test y validacion"""
+        """Se dividen los datos en entrenamiento (80%), validacion (10%) y test (10%) manteniendo proporciones"""
         self.train_df, temp_df = train_test_split(
             self.df_metadatos,
-            test_size=0.2, # Se dividen los datos en 80/20
+            test_size=0.2,
             stratify=self.df_metadatos['especie'],
             random_state=self.seed
         )
 
         self.val_df, self.test_df = train_test_split(
             temp_df,
-            test_size=0.50, # El 20% restante se dividen 50/50 para validacion y test
+            test_size=0.50,
             stratify=temp_df['especie'],
             random_state=self.seed
         )
@@ -183,7 +214,7 @@ class DivisorDatos:
         print(f"  - Test:  {len(self.test_df)} imágenes ({len(self.test_df) / len(self.df_metadatos) * 100:.1f}%)")
 
     def copiar_a_disco(self):
-        """Guarda en disco los datos divididos en la ruta processed"""
+        """Copia fisicamente las imagenes organizadas en carpetas train/val/test y por especie"""
         conjuntos = [
             ('train', self.train_df),
             ('val', self.val_df),
@@ -196,4 +227,3 @@ class DivisorDatos:
                 nombre_archivo = Path(fila['ruta']).name
                 shutil.copy2(fila['ruta'], carpeta_destino / nombre_archivo)
         print("✓ Todas las imágenes fueron organizadas exitosamente en disco.")
-
