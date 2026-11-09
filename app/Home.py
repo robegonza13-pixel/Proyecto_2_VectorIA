@@ -97,9 +97,9 @@ with tab1:
                     nombre_modelo_activo = "Demostración referencial"
                     # Modelo oficial por excelencia: MobileNetV2 con Fine-Tuning
                     for ruta, mobile, nombre in [
-                        ('models/mobilenetv2_final.keras', False, 'MobileNetV2 Fine-Tuned (Oficial)'),
-                        ('models/mobilenetv2_fase1.keras', False, 'MobileNetV2 Fase 1'),
-                        ('models/cnn_propia.keras', True, 'CNN Propia'),
+                        ('models/mobilenetv2_final.keras', True, 'MobileNetV2 Fine-Tuned (Oficial)'),
+                        ('models/mobilenetv2_fase1.keras', True, 'MobileNetV2 Fase 1'),
+                        ('models/cnn_propia.keras', False, 'CNN Propia'),
                     ]:
                         if Path(ruta).exists():
                             try:
