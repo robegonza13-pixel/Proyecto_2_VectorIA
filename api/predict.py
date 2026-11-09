@@ -72,9 +72,9 @@ COLUMNAS_LSTM = _FEATURES_BASE_LSTM + _FEATURES_TEMPORAL_LSTM + _FEATURES_LAG_LS
 
 
 def _preparar_ventana_lstm(df: pd.DataFrame, indice_corte: int, n_pasos: int) -> pd.DataFrame:
-    """Reconstruye las 24 features (con rezagos y componentes circulares) para los últimos n_pasos."""
-    inicio = max(0, indice_corte - n_pasos - 4)
-    ventana_ext = df.iloc[inicio:indice_corte].copy()
+    fin = indice_corte + 1                  # +1 para INCLUIR la semana elegida
+    inicio = max(0, fin - n_pasos - 4)      # 4 filas extra para calcular los rezagos
+    ventana_ext = df.iloc[inicio:fin].copy()
     ventana_ext["fecha_inicio_semana"] = pd.to_datetime(ventana_ext["fecha_inicio_semana"])
 
     ventana_ext["semana_sin"] = np.sin(2 * np.pi * ventana_ext["semana_epi"] / 52.0)
@@ -96,12 +96,14 @@ class PredictLSTM:
         ruta_scaler="models/scaler_lstm.joblib",
         ruta_datos_nacional="data/raw/vectoria_dengue_nacional_real.csv",
         n_pasos=26,
+        ruta_scaler_y="models/scaler_y_lstm.joblib"
     ):
         self.modelo = keras.models.load_model(ruta_modelo)
         self.scaler = joblib.load(ruta_scaler)
         self.n_pasos = n_pasos
         self.n_features = len(COLUMNAS_LSTM)  # 24
         self.df_nacional = self._cargar_datos(ruta_datos_nacional)
+        self.scaler_y = joblib.load(ruta_scaler_y)
 
     def _cargar_datos(self, ruta_csv):
         ruta = Path(ruta_csv)
@@ -142,16 +144,28 @@ class PredictLSTM:
         entrada_lstm = np.expand_dims(datos_escalados, axis=0)  # (1, 26, 24)
 
         pred_escalada = self.modelo.predict(entrada_lstm, verbose=0)[0]  # (4,)
-        dummy = np.zeros((4, self.n_features))
-        dummy[:, 0] = pred_escalada
-        casos_pred = np.maximum(0, self.scaler.inverse_transform(dummy)[:, 0]).round(1).tolist()
+        casos_pred = np.maximum(
+            0, self.scaler_y.inverse_transform(pred_escalada.reshape(-1, 1)).flatten()
+        ).round(1).tolist()
 
         fecha_base = df.iloc[indice_corte]["fecha_inicio_semana"]
         fechas_futuras = [fecha_base.date() + timedelta(weeks=i + 1) for i in range(4)]
 
+        anio_actual = int(df.iloc[indice_corte]["anio"])
         sem_actual = int(df.iloc[indice_corte]["semana_epi"])
-        casos_misma_semana = df[df["semana_epi"] == sem_actual]["casos_dengue"]
-        umbral_75 = float(np.percentile(casos_misma_semana, 75))
+        suma_4sem_hist = df["casos_dengue"].rolling(4).sum().shift(-4)
+
+        # canal endémico: misma semana epi, solo los 5 años anteriores
+        historico = suma_4sem_hist[
+            (df["semana_epi"] == sem_actual)
+            & (df["anio"] >= anio_actual - 5)
+            & (df["anio"] < anio_actual)
+            ].dropna()
+
+        if len(historico) == 0:  # años iniciales (2014) sin años previos: usa todo el historial
+            historico = suma_4sem_hist[df["semana_epi"] == sem_actual].dropna()
+
+        umbral_75 = float(np.percentile(historico, 75))
 
         return RespuestaRNN(
             casos_pronosticados=casos_pred,
@@ -195,14 +209,16 @@ MOTIVOS = {
 
 class PredictANN:
     """Inferencia para recomendación de acciones preventivas (Módulo 3)."""
-    def __init__(self, ruta_modelo="models/ann.h5", ruta_scaler="models/scaler_ann.pkl", ruta_label_encoder=None):
+    def __init__(self, ruta_modelo="models/ann.h5", ruta_scaler="models/scaler_ann.pkl", ruta_label_encoder=None,):
         self.modelo = keras.models.load_model(ruta_modelo)
         self.scaler = joblib.load(ruta_scaler) if ruta_scaler and Path(ruta_scaler).exists() else None
+
         if ruta_label_encoder and Path(ruta_label_encoder).exists():
             le = joblib.load(ruta_label_encoder)
             self.clases = list(le.classes_)
         else:
             self.clases = CLASES_ANN
+
 
     def predecir(self, solicitud: SolicitudANN) -> RespuestaANN:
         valores = [getattr(solicitud, col) for col in COLUMNAS_ANN]

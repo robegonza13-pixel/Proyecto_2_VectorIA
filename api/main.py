@@ -54,8 +54,14 @@ def cargar_modelos():
             predictor_cnn = PredictCNN(str(ruta_mobilenet_f1), tamano=224, ruta_clases=ruta_clases)
             print(f"✓ Modelo cargado en API: MobileNetV2 Fase 1 — {ruta_mobilenet_f1}")
 
-        if Path("models/lstm_casos.keras").exists() and Path("models/scaler_lstm.joblib").exists():
-            predictor_lstm = PredictLSTM("models/lstm_casos.keras", "models/scaler_lstm.joblib")
+        if (MODELS_DIR / "lstm_casos.keras").exists() \
+                and (MODELS_DIR / "scaler_lstm.joblib").exists() \
+                and (MODELS_DIR / "scaler_y_lstm.joblib").exists():
+            predictor_lstm = PredictLSTM(
+                str(MODELS_DIR / "lstm_casos.keras"),
+                str(MODELS_DIR / "scaler_lstm.joblib"),
+                ruta_scaler_y=str(MODELS_DIR / "scaler_y_lstm.joblib"),
+            )
 
         if Path("models/ann.h5").exists() and Path("models/scaler_ann.pkl").exists():
             predictor_ann = PredictANN("models/ann.h5", ruta_scaler="models/scaler_ann.pkl")

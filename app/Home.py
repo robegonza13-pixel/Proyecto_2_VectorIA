@@ -140,7 +140,7 @@ with tab2:
         fechas_disponibles = df_nac['fecha_inicio_semana'].dt.date.tolist()
         fecha_elegida = st.select_slider(
             "Seleccionar semana epidemiológica de consulta:",
-            options=fechas_disponibles[26:],
+            options=fechas_disponibles[30:],
             value=fechas_disponibles[-1]
         )
 
@@ -152,41 +152,35 @@ with tab2:
             st.metric("Semana Epi", int(fila_ref['semana_epi']))
             st.metric("Casos Reportados en Semana", int(fila_ref['casos_dengue']))
 
-            st.session_state['temp_max_sim'] = float(fila_ref['temp_max_c'])
-            st.session_state['lluvia_sim'] = float(fila_ref['lluvia_mm'] * 2.0)
-            st.session_state['humedad_sim'] = float(fila_ref['humedad_rel_pct'])
+            if st.session_state.get('ultima_semana') != fecha_elegida:
+                st.session_state['ultima_semana'] = fecha_elegida
+                st.session_state['temp_max_sim'] = float(fila_ref['temp_max_c'])
+                st.session_state['humedad_sim'] = float(fila_ref['humedad_rel_pct'])
+                # lluvia de 14 días = esta semana + la anterior (en vez de multiplicar por 2)
+                pos = fila_ref.name
+                st.session_state['lluvia_sim'] = float(df_nac['lluvia_mm'].iloc[max(0, pos - 1):pos + 1].sum())
 
         with col_lstm2:
             if st.button("📊 Generar Pronóstico a 4 Semanas", type="primary"):
+                datos = None
                 with st.spinner("Consultando pronóstico al modelo LSTM en el backend..."):
-                    casos_proy = []
-                    umbral_75 = 0.0
-
                     try:
-                        payload = {"fecha_inicio": str(fecha_elegida)}
-                        res = requests.post(f"{API_URL}/predict/casos", json=payload)
-
+                        res = requests.post(f"{API_URL}/predict/casos",
+                                            json={"fecha_inicio": str(fecha_elegida)}, timeout=30)
                         if res.status_code == 200:
-                            data = res.json()
-                            casos_proy = data["casos_pronosticados"]
-                            fechas_proy = data["fechas"]
-                            suma_4sem = data["casos_pred_4sem"]
-                            umbral_75 = data["casos_umbral_endemico"]
-                            st.success("Pronóstico cargado desde el microservicio LSTM.")
+                            datos = res.json()
                         else:
-                            st.warning(f"API retornó error {res.status_code}. Generando proyección referencial.")
-                            raise ValueError("API Error")
+                            st.error(f"La API respondió {res.status_code}: {res.text}")
+                    except requests.exceptions.ConnectionError:
+                        st.error("🚨 No se pudo conectar con la API. Verifica que FastAPI esté encendido.")
+                    except requests.exceptions.Timeout:
+                        st.error("La API tardó demasiado en responder.")
 
-                    except Exception as e:
-                        base_c = float(fila_ref['casos_dengue'])
-                        casos_proy = [round(base_c * f, 1) for f in [1.08, 1.15, 1.22, 1.18]]
-                        fechas_proy = [(fecha_elegida + timedelta(weeks=i + 1)).strftime('%Y-%m-%d') for i in range(4)]
-                        suma_4sem = float(sum(casos_proy))
-
-                        casos_sem = df_nac[df_nac['semana_epi'] == fila_ref['semana_epi']]['casos_dengue']
-                        import numpy as np
-
-                        umbral_75 = float(np.percentile(casos_sem, 75))
+                if datos is not None:
+                    casos_proy = datos["casos_pronosticados"]
+                    fechas_proy = datos["fechas"]
+                    suma_4sem = datos["casos_pred_4sem"]
+                    umbral_75 = datos["casos_umbral_endemico"]
 
                     st.session_state['casos_sim'] = int(suma_4sem)
                     st.session_state['umbral_sim'] = int(umbral_75)
@@ -229,8 +223,8 @@ with tab3:
 
     with col_ann1:
         # Los sliders usan 'key' para enlazarse con la sesión y arrancan de cero
-        casos_sim = st.slider("Casos Pronosticados (próximas 4 semanas)", 0, 5000, key="casos_sim")
-        umbral_sim = st.slider("Umbral Endémico de Referencia (4 semanas)", 0, 5000, key="umbral_sim")
+        casos_sim = st.slider("Casos Pronosticados (próximas 4 semanas)", 0, 12000, key="casos_sim")
+        umbral_sim = st.slider("Umbral Endémico de Referencia (4 semanas)", 0, 12000, key="umbral_sim")
         lluvia_sim = st.slider("Lluvia acumulada 14 días (mm)", 0.0, 1000.0, key="lluvia_sim")
 
     with col_ann2:
@@ -246,45 +240,32 @@ with tab3:
         aegypti_val = 1 if "Sí" in aegypti_opcion else 0
 
     if st.button("🛡️ Evaluar Acción Preventiva", type="primary"):
+        payload_ann = {
+            "casos_pred_4sem": float(casos_sim),
+            "casos_umbral_endemico": float(umbral_sim),
+            "lluvia_14d_mm": float(lluvia_sim),
+            "temp_max": float(temp_max_sim),
+            "temp_min": float(temp_min_sim),
+            "humedad": float(humedad_sim),
+            "aegypti_detectado": int(aegypti_val),
+        }
+
+        data = None
         with st.spinner("Consultando motor de decisiones ANN en el backend..."):
-            recomendacion = "monitoreo_normal"
-            motivo_texto = ""
-
             try:
-                payload_ann = {
-                    "casos_pred_4sem": float(casos_sim),
-                    "casos_umbral_endemico": float(umbral_sim),
-                    "lluvia_14d_mm": float(lluvia_sim),
-                    "temp_max": float(temp_max_sim),
-                    "temp_min": float(temp_min_sim),
-                    "humedad": float(humedad_sim),
-                    "aegypti_detectado": int(aegypti_val)
-                }
-
-                res = requests.post(f"{API_URL}/predict/accion", json=payload_ann)
-
+                res = requests.post(f"{API_URL}/predict/accion", json=payload_ann, timeout=30)
                 if res.status_code == 200:
                     data = res.json()
-                    recomendacion = data["recomendacion"]
-                    motivo_texto = data["motivo"]
                 else:
-                    st.warning(
-                        f"La API no respondió correctamente ({res.status_code}). Aplicando reglas de respaldo...")
-                    raise ValueError("Fallo API")
+                    st.error(f"La API respondió {res.status_code}: {res.text}")
+            except requests.exceptions.ConnectionError:
+                st.error("🚨 No se pudo conectar con la API. Verifica que FastAPI esté encendido.")
+            except requests.exceptions.Timeout:
+                st.error("La API tardó demasiado en responder.")
 
-            except Exception as e:
-                if casos_sim > 2 * umbral_sim:
-                    recomendacion = "alerta_sanitaria"
-                    motivo_texto = f"Los casos proyectados ({casos_sim}) superan el doble del umbral endémico ({umbral_sim}). Se requiere movilización urgente de recursos hospitalarios."
-                elif casos_sim > umbral_sim and aegypti_val == 1:
-                    recomendacion = "fumigacion_focalizada"
-                    motivo_texto = f"Casos proyectados ({casos_sim}) superan el umbral endémico ({umbral_sim}) con presencia confirmada de Aedes aegypti."
-                elif lluvia_sim > 80.0 and temp_max_sim > 27.0:
-                    recomendacion = "eliminacion_criaderos"
-                    motivo_texto = f"Condiciones climáticas críticas (Lluvia: {lluvia_sim:.1f} mm, Temp: {temp_max_sim:.1f} °C) propician eclosión masiva."
-                else:
-                    recomendacion = "monitoreo_normal"
-                    motivo_texto = "Los indicadores epidemiológicos y climáticos se mantienen dentro de los rangos de seguridad."
+        if data is not None:
+            recomendacion = data["recomendacion"]
+            motivo_texto = data["motivo"]
 
             st.markdown("---")
             if recomendacion == "alerta_sanitaria":
