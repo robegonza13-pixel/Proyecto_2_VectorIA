@@ -1,5 +1,20 @@
-#IDE
+# Entornos y compilación
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
 .idea/
+.vscode/
+.DS_Store
 
-#Environment
-.venv
+# Datos masivos (evitar sobrepasar el límite de 100 MB de GitHub)
+data/raw/mosquitos/
+data/processed/
+*.zip
+*.tar.gz
+
+# Checkpoints intermedios pesados
+models/*.keras
+models/*.h5
+!models/.gitkeep

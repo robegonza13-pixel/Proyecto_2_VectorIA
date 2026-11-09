@@ -9,5 +9,7 @@ opencv-python
 pydantic
 joblib
 fastapi
+uvicorn
+python-multipart
 streamlit
 plotly

@@ -2,6 +2,7 @@ from datetime import date
 from typing import Literal
 from pydantic import BaseModel, Field
 
+
 class RespuestaCNN(BaseModel):
     """Respuesta de la clasificación de especies de mosquitos."""
     especie: str
@@ -25,7 +26,7 @@ class RespuestaRNN(BaseModel):
 
 
 class SolicitudANN(BaseModel):
-    """Variables de entrada para recomendar la acción preventiva."""
+    """Variables de entrada para recomendar la acción preventiva (7 features del scaler_ann.pkl)."""
     casos_pred_4sem: float = Field(ge=0)
     casos_umbral_endemico: float = Field(ge=0)
     lluvia_14d_mm: float = Field(ge=0)
@@ -33,7 +34,6 @@ class SolicitudANN(BaseModel):
     temp_min: float
     humedad: float = Field(ge=0, le=100)
     aegypti_detectado: int = Field(ge=0, le=1)
-    semana_epi: int = Field(ge=1, le=53)
 
 
 class RespuestaANN(BaseModel):
