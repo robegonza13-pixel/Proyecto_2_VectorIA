@@ -1,14 +1,14 @@
 from io import BytesIO
 from pathlib import Path
 from datetime import timedelta
+import json
 import numpy as np
 import pandas as pd
 from PIL import Image
 from tensorflow import keras
-from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 import joblib
 
-from .schemas import (
+from api.schemas import (
     RespuestaCNN,
     SolicitudPronostico,
     RespuestaRNN,
@@ -18,26 +18,32 @@ from .schemas import (
 
 
 class PredictCNN:
-    """Inferencia oficial para clasificación de especies de mosquitos usando CNN Propia."""
-    def __init__(self, ruta_modelo="models/cnn_propia.keras", tamano=224, es_mobilenet=False):
+    """Inferencia para clasificación de especies de mosquitos.
+    Tanto la CNN propia (Rescaling 1/255) como MobileNetV2 (Rescaling 1/127.5,
+    offset=-1) incluyen su propio reescalado como parte del modelo guardado,
+    así que aquí SIEMPRE se envía la imagen cruda en rango 0-255."""
+
+    def __init__(self, ruta_modelo="models/cnn_propia.keras", tamano=224,
+                 ruta_clases="models/clases_cnn.json"):
         self.ruta_modelo = ruta_modelo
         self.tamano = tamano
-        self.es_mobilenet = es_mobilenet
         self.modelo = keras.models.load_model(ruta_modelo)
-        # Nombres canónicos de las 3 clases (mismo orden que image_dataset_from_directory)
-        self.clases = ["aedes aegypti", "aedes albopictus", "culex"]
+
+        ruta_clases = Path(ruta_clases)
+        if ruta_clases.exists():
+            with open(ruta_clases, "r", encoding="utf-8") as f:
+                self.clases = json.load(f)
+        else:
+            self.clases = ["aedes aegypti", "aedes albopictus", "culex"]
+            print("⚠ No se encontró models/clases_cnn.json, usando orden por defecto sin verificar.")
 
     def preparar_imagen(self, imagen_bytes: bytes):
-        """Carga, convierte a RGB. La CNN propia incluye Rescaling(1/255) internamente."""
+        """Carga, convierte a RGB y redimensiona. Sin reescalado externo:
+        los dos modelos lo hacen internamente."""
         imagen = Image.open(BytesIO(imagen_bytes))
         imagen = imagen.convert("RGB")
         imagen = imagen.resize((self.tamano, self.tamano))
         arreglo = np.array(imagen, dtype=np.float32)
-
-        # Preprocesamiento nativo de MobileNetV2 (0-255 -> -1 a 1)
-        if self.es_mobilenet:
-            arreglo = preprocess_input(arreglo)
-
         return np.expand_dims(arreglo, axis=0)
 
     def predecir(self, imagen_bytes: bytes) -> RespuestaCNN:
@@ -45,8 +51,6 @@ class PredictCNN:
         probabilidades = self.modelo.predict(entrada, verbose=0)[0]
         posicion = int(np.argmax(probabilidades))
         especie = self.clases[posicion]
-
-        # Coincidencia robusta para detectar si es Aedes aegypti
         es_aegypti = int("aegypti" in especie.lower())
 
         return RespuestaCNN(
@@ -57,7 +61,6 @@ class PredictCNN:
 
 
 # Columnas de entrada del scaler_lstm.joblib (24 features con rezagos y componentes circulares)
-# Deben coincidir EXACTAMENTE con self.feature_cols del LstmModel entrenado
 _FEATURES_BASE_LSTM = ["casos_dengue", "lluvia_mm", "temp_max_c", "temp_min_c", "humedad_rel_pct"]
 _FEATURES_TEMPORAL_LSTM = ["semana_sin", "semana_cos", "semana_epi"]
 _FEATURES_LAG_LSTM = [
@@ -70,31 +73,23 @@ COLUMNAS_LSTM = _FEATURES_BASE_LSTM + _FEATURES_TEMPORAL_LSTM + _FEATURES_LAG_LS
 
 def _preparar_ventana_lstm(df: pd.DataFrame, indice_corte: int, n_pasos: int) -> pd.DataFrame:
     """Reconstruye las 24 features (con rezagos y componentes circulares) para los últimos n_pasos."""
-    # Ampliamos la ventana para poder calcular rezagos máximos (lag4)
     inicio = max(0, indice_corte - n_pasos - 4)
     ventana_ext = df.iloc[inicio:indice_corte].copy()
     ventana_ext["fecha_inicio_semana"] = pd.to_datetime(ventana_ext["fecha_inicio_semana"])
 
-    # Componentes circulares de estacionalidad
     ventana_ext["semana_sin"] = np.sin(2 * np.pi * ventana_ext["semana_epi"] / 52.0)
     ventana_ext["semana_cos"] = np.cos(2 * np.pi * ventana_ext["semana_epi"] / 52.0)
 
-    # Rezagos de las 4 variables climáticas
     for col in ["lluvia_mm", "temp_max_c", "temp_min_c", "humedad_rel_pct"]:
         for lag in [1, 2, 3, 4]:
             ventana_ext[f"{col}_lag{lag}"] = ventana_ext[col].shift(lag)
 
-    # Eliminamos las filas con NaN por los rezagos y tomamos las últimas n_pasos filas
     ventana_ext = ventana_ext.dropna(subset=COLUMNAS_LSTM).reset_index(drop=True)
     return ventana_ext.tail(n_pasos)
 
 
 class PredictLSTM:
-    """Inferencia para pronóstico semanal de casos de dengue (Módulo 2).
-    
-    El scaler_lstm.joblib fue entrenado con 24 features (5 base + 3 temporales + 16 rezagos).
-    Este predictor reconstruye exactamente esas features antes de escalar.
-    """
+    """Inferencia para pronóstico semanal de casos de dengue (Módulo 2)."""
     def __init__(
         self,
         ruta_modelo="models/lstm_casos.keras",
@@ -119,7 +114,6 @@ class PredictLSTM:
     def predecir(self, solicitud: SolicitudPronostico) -> RespuestaRNN:
         df = self.df_nacional
 
-        # Ubicar la fila de referencia por fecha o por año y semana epidemiológica
         if solicitud.fecha_inicio:
             fecha_dt = pd.to_datetime(solicitud.fecha_inicio)
             idx = df[df["fecha_inicio_semana"] == fecha_dt].index
@@ -139,7 +133,6 @@ class PredictLSTM:
                 f"Se requieren al menos {self.n_pasos + 4} semanas previas para calcular rezagos y proyectar."
             )
 
-        # Reconstruir las 24 columnas con rezagos y componentes circulares
         ventana = _preparar_ventana_lstm(df, indice_corte, self.n_pasos)
 
         if len(ventana) < self.n_pasos:
@@ -168,7 +161,6 @@ class PredictLSTM:
         )
 
 
-# Las 7 columnas exactas con las que se entrenó la ANN (notebook 04 y scaler_ann.pkl)
 COLUMNAS_ANN = [
     "casos_pred_4sem",
     "casos_umbral_endemico",

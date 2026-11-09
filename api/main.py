@@ -1,14 +1,15 @@
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from .schemas import (
+from api.schemas import (
     RespuestaCNN,
     SolicitudPronostico,
     RespuestaRNN,
     SolicitudANN,
     RespuestaANN,
 )
-from .predict import PredictCNN, PredictLSTM, PredictANN
+from api.predict import PredictCNN, PredictLSTM, PredictANN
+from pathlib import Path
 
 app = FastAPI(
     title="VectorIA API",
@@ -16,7 +17,6 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Permitir conexiones desde Streamlit o navegadores
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,27 +25,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Inicialización diferida de predictores
 predictor_cnn: PredictCNN | None = None
 predictor_lstm: PredictLSTM | None = None
 predictor_ann: PredictANN | None = None
 
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent  # VectorIA/ (un nivel arriba de api/)
+MODELS_DIR = BASE_DIR / "models"
 
 @app.on_event("startup")
 def cargar_modelos():
-    """Carga los modelos entrenados si están disponibles en disco, priorizando CNN Propia."""
+    """Carga los modelos entrenados si están disponibles en disco, priorizando el de mejor F1 (MobileNetV2)."""
     global predictor_cnn, predictor_lstm, predictor_ann
     try:
-        # Prioridad: CNN Propia (modelo desde cero entrenado en el proyecto)
-        if Path("models/cnn_propia.keras").exists():
-            predictor_cnn = PredictCNN("models/cnn_propia.keras", tamano=224, es_mobilenet=False)
-            print("✓ Modelo oficial cargado en API: CNN Propia")
-        elif Path("models/mobilenetv2_final.keras").exists():
-            predictor_cnn = PredictCNN("models/mobilenetv2_final.keras", tamano=224, es_mobilenet=True)
-            print("✓ Modelo cargado en API: MobileNetV2 Final")
-        elif Path("models/mobilenetv2_fase1.keras").exists():
-            predictor_cnn = PredictCNN("models/mobilenetv2_fase1.keras", tamano=224, es_mobilenet=True)
-            print("✓ Modelo cargado en API: MobileNetV2 Fase 1")
+        ruta_mobilenet = MODELS_DIR / "mobilenetv2_final.keras"
+        ruta_cnn_propia = MODELS_DIR / "cnn_propia.keras"
+        ruta_mobilenet_f1 = MODELS_DIR / "mobilenetv2_fase1.keras"
+        ruta_clases = str(MODELS_DIR / "clases_cnn.json")
+
+        if ruta_mobilenet.exists():
+            predictor_cnn = PredictCNN(str(ruta_mobilenet), tamano=224, ruta_clases=ruta_clases)
+            print(f"✓ Modelo oficial cargado en API: MobileNetV2 (mejor F1) — {ruta_mobilenet}")
+        elif ruta_cnn_propia.exists():
+            predictor_cnn = PredictCNN(str(ruta_cnn_propia), tamano=224, ruta_clases=ruta_clases)
+            print(f"✓ Modelo cargado en API: CNN Propia (fallback) — {ruta_cnn_propia}")
+        elif ruta_mobilenet_f1.exists():
+            predictor_cnn = PredictCNN(str(ruta_mobilenet_f1), tamano=224, ruta_clases=ruta_clases)
+            print(f"✓ Modelo cargado en API: MobileNetV2 Fase 1 — {ruta_mobilenet_f1}")
 
         if Path("models/lstm_casos.keras").exists() and Path("models/scaler_lstm.joblib").exists():
             predictor_lstm = PredictLSTM("models/lstm_casos.keras", "models/scaler_lstm.joblib")
@@ -65,16 +72,16 @@ def estado():
     return {
         "sistema": "VectorIA API",
         "estado": "operativo",
-        "modelo_cnn": "CNN Propia (desde cero con bloques de atención)",
+        "modelo_cnn": Path(predictor_cnn.ruta_modelo).name if predictor_cnn else "no cargado",
         "aviso_etico": "Herramienta de apoyo a la vigilancia epidemiológica; no diagnostica dengue en personas.",
     }
 
 
 @app.post("/predict/mosquito", response_model=RespuestaCNN)
 async def predecir_mosquito(imagen: UploadFile = File(...)):
-    """Clasifica la especie de mosquito en la fotografía utilizando MobileNetV2."""
+    """Clasifica la especie de mosquito en la fotografía (CNN propia, con fallback a MobileNetV2)."""
     if predictor_cnn is None:
-        raise HTTPException(status_code=503, detail="Modelo MobileNetV2 no disponible o no cargado en models/.")
+        raise HTTPException(status_code=503, detail="Modelo CNN no disponible o no cargado en models/.")
     contenido = await imagen.read()
     return predictor_cnn.predecir(contenido)
 

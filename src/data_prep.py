@@ -77,11 +77,13 @@ class AuditorDataset:
                             })
                             hashes_vistos.add(hash_archivo)
 
+
                         except Exception as e:
+
                             print(f"\n❌ Error DETECTADO en la imagen {imagen.name}: {e}")
                             traceback.print_exc()
                             self.corruptas.append(imagen)
-                            break
+                            continue  # sigue con la siguiente imagen de la misma clase
 
         self.df_metadatos = pd.DataFrame(registros)
 

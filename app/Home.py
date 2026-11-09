@@ -10,7 +10,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 from PIL import Image
 from tensorflow import keras
-from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 import joblib
 
 # ---------------------------------------------------------
@@ -90,38 +89,41 @@ with tab1:
         if archivo_subido is not None:
             if st.button("🔍 Identificar Especie", type="primary"):
                 with st.spinner("Analizando características anatómicas con la red convolucional..."):
-                    clases = ["Aedes aegypti", "Aedes albopictus", "Culex"]
-                    modelo_cargado = None
-                    es_mobilenet = False
+                    BASE_DIR = Path(__file__).resolve().parent.parent  # ajusta si Home.py no vive en app/
+                    MODELS_DIR = BASE_DIR / "models"
 
+                    ruta_clases = MODELS_DIR / "clases_cnn.json"
+                    if ruta_clases.exists():
+                        clases = json.loads(ruta_clases.read_text(encoding="utf-8"))
+                    else:
+                        clases = ["Aedes aegypti", "Aedes albopictus", "Culex"]
+
+                    modelo_cargado = None
                     nombre_modelo_activo = "Demostración referencial"
-                    # Modelo oficial por excelencia: MobileNetV2 con Fine-Tuning
-                    for ruta, mobile, nombre in [
-                        ('models/cnn_propia.keras', False, 'CNN Propia (Oficial)'),
-                        ('models/mobilenetv2_final.keras', True, 'MobileNetV2 Fine-Tuned'),
-                        ('models/mobilenetv2_fase1.keras', True, 'MobileNetV2 Fase 1'),
+                    # Prioridad por mejor F1: MobileNetV2 primero, CNN propia como respaldo
+                    for ruta, nombre in [
+                        (MODELS_DIR / 'mobilenetv2_final.keras', 'MobileNetV2 Fine-Tuned (mejor F1)'),
+                        (MODELS_DIR / 'cnn_propia.keras', 'CNN Propia (respaldo)'),
+                        (MODELS_DIR / 'mobilenetv2_fase1.keras', 'MobileNetV2 Fase 1'),
                     ]:
-                        if Path(ruta).exists():
+                        if ruta.exists():
                             try:
-                                modelo_cargado = keras.models.load_model(ruta)
-                                es_mobilenet = mobile
+                                modelo_cargado = keras.models.load_model(str(ruta))
                                 nombre_modelo_activo = nombre
                                 break
                             except Exception:
                                 pass
 
                     if modelo_cargado is not None:
+                        # Ambos modelos reescalan internamente (Rescaling); se envía 0-255 crudo
                         img_resized = img_pil.resize((224, 224))
                         arr = np.array(img_resized, dtype=np.float32)
-                        if es_mobilenet:
-                            arr = preprocess_input(arr)
                         entrada = np.expand_dims(arr, axis=0)
                         probabilidades = modelo_cargado.predict(entrada, verbose=0)[0]
                         idx_max = int(np.argmax(probabilidades))
                         especie = clases[idx_max]
                         confianza = float(probabilidades[idx_max])
                     else:
-                        # Demostración calibrada si aún no se copia el peso
                         especie = "Aedes aegypti"
                         confianza = 0.932
 
@@ -131,10 +133,10 @@ with tab1:
                     st.session_state['aegypti_detectado'] = es_aegypti
 
                     if es_aegypti == 1:
-                        st.error(f"🚨 **Vector Primario Detectado:** {especie} ({confianza*100:.1f}% certeza)")
+                        st.error(f"🚨 **Vector Primario Detectado:** {especie} ({confianza * 100:.1f}% certeza)")
                         st.warning("⚠️ *Aedes aegypti* representa alto riesgo de transmisión comunitaria.")
                     else:
-                        st.success(f"✓ **Especie Identificada:** {especie} ({confianza*100:.1f}% certeza)")
+                        st.success(f"✓ **Especie Identificada:** {especie} ({confianza * 100:.1f}% certeza)")
 
                     st.info("💡 Este resultado se ha vinculado automáticamente al Módulo 3 de Recomendaciones.")
                     st.caption(f"🔬 Inferencia ejecutada con: **{nombre_modelo_activo}**")
