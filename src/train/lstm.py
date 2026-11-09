@@ -2,11 +2,13 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import tensorflow as tf
 
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import SimpleRNN, LSTM, Dense, Dropout
+from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.preprocessing.sequence import TimeseriesGenerator
 
@@ -86,28 +88,30 @@ class LstmModel:
         n_features = scaled_train.shape[1]
         early_stop = EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True)
 
+        # optimizador con tasa de aprendizaje conservadora para evitar NaNs
+        optimizer = Adam(learning_rate=0.001)
+
         # modelo base: contiene SimpleRNN
         print("Entrenamiento de baseline: SimpleRNN")
-        self.model_rnn = Sequential(
-            tf.keras.Input(shape=(self.length, n_features)),
-            SimpleRNN(32, activation = 'relu'),
-            Dense(self.horizon))
+        self.model_rnn = Sequential()
+        self.model_rnn.add(tf.keras.Input(shape=(self.length, n_features)))
+        self.model_rnn.add(SimpleRNN(32, activation = 'tanh'))
+        self.model_rnn.add(Dense(self.horizon))
 
-        self.model_rnn.compile(optimizer='adam', loss='mse')
+        self.model_rnn.compile(optimizer= Adam(learning_rate=0.001), loss='mse')
         self.model_rnn.fit(x_train, y_train, epochs=epochs, batch_size=batch_size,
                             validation_data=(x_test, y_test), callbacks=[early_stop], verbose=0)
 
         # modelo principal: LSTM
         print("Entrenamiento del modelo LSTM")
-        self.model_lstm = Sequential([
-            tf.keras.Input(shape=(self.lenght, n_features)),
-            LSTM(64, activation='relu', return_sequences=True),
-            LSTM(32, activation='relu'),
-            Dropout(0.2),
-            Dense(self.horizon)
-        ])
+        self.model_lstm = Sequential()
+        self.model_lstm.add(tf.keras.Input(shape=(self.length, n_features)))
+        self.model_lstm.add(LSTM(64, activation='tanh', return_sequences=True))
+        self.model_lstm.add(LSTM(32, activation='tanh'))
+        self.model_lstm.add(Dropout(0.2))
+        self.model_lstm.add(Dense(self.horizon))
 
-        self.model_lstm.compile(optimizer='adam', loss='mse')
+        self.model_lstm.compile(optimizer= Adam(learning_rate=0.001), loss='mse')
         early_stop = EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True)
 
         history_lstm = self.model_lstm.fit(x_train, y_train, epochs=epochs, batch_size=batch_size,
@@ -125,6 +129,7 @@ class LstmModel:
         y_pred_rnn_scaled = self.model_rnn.predict(x_test)
         y_pred_lstm_scaled = self.model_lstm.predict(x_test)
 
+
         # función para desescalar y obtener los casos reales de dengue
         def desescalar(datos_scaled):
             n_samples = datos_scaled.shape[0]
@@ -132,16 +137,37 @@ class LstmModel:
             dummy = np.zeros((n_samples * self.horizon, n_features))
             dummy[:, 0] = datos_scaled.flatten()
             inv = self.scaler.inverse_transform(dummy)
+
             return inv[:, 0].reshape(n_samples, self.horizon)
 
         y_true = desescalar(y_test_scaled)
         y_pred_rnn = desescalar(y_pred_rnn_scaled)
         y_pred_lstm = desescalar(y_pred_lstm_scaled)
 
+        # aplanamos a 1D para aplicar la limpieza de forma limpia
+        y_true_flat = y_true.flatten()
+        y_pred_rnn_flat = y_pred_rnn.flatten()
+        y_pred_lstm_flat = y_pred_lstm.flatten()
+
+        print("Antes de aplicar el filtro:", len(y_true_flat))
+
+        # si hay valores en 0 se van a rellenar con 0 o la media
+        y_pred_rnn_flat = np.nan_to_num(y_pred_rnn_flat, nan=0.0)
+        y_pred_lstm_flat = np.nan_to_num(y_pred_lstm_flat, nan=0.0)
+        y_true_flat = np.nan_to_num(y_true_flat, nan=0.0)
+
+        # máscara para conservar solo valores finitos válidos
+        mascara = np.isfinite(y_true_flat) & np.isfinite(y_pred_lstm_flat) & np.isfinite(y_pred_rnn_flat)
+
+        y_true_clean = y_true_flat[mascara]
+        y_pred_rnn_clean = y_pred_rnn_flat[mascara]
+        y_pred_lstm_clean = y_pred_lstm_flat[mascara]
+
+        print("Después de aplicar el filtro:", len(y_true_clean))
+
         # calculo de baseline estacional
         # se realiza construyendo un array de baseline estacional para el test set
         y_baseline_estacional = np.zeros_like(y_true)
-
         total_len = len(self.df)
         test_start_idx = total_len - test_size
 
@@ -149,7 +175,6 @@ class LstmModel:
             # indice de la semana actual dentro del dataframe
             # al crear secuencias, el primer target empieza en test_start_idx
             abs_idx = test_start_idx + self.length + i
-
             #buscamos los casos de 52 semanas (1 año) antes
             target_historical_idx = abs_idx - 52
 
@@ -157,19 +182,28 @@ class LstmModel:
                 # tomamos un bloque de 4 semanas de un añp atras
                 y_baseline_estacional[i] =  self.df['casos_dengue'].iloc[target_historical_idx : target_historical_idx + self.horizon].values
             else:
-                y_baseline_estacional[i] = y_true[0]
+                y_baseline_estacional[i] = y_true[0] # evita que ocurran desbordamientos
+
+        y_baseline_flat = y_baseline_estacional.flatten()
+        y_baseline_clean = y_baseline_flat[mascara]
+
+        if len(y_true_clean) == 0 or len(y_baseline_clean) == 0:
+            y_true_clean = y_true_flat
+            y_pred_rnn_clean = y_pred_rnn_flat
+            y_pred_lstm_clean = y_pred_lstm_flat
+            y_baseline_clean = y_baseline_flat
 
         # calculo de las métricas de SimpleRNN
-        rmse_rnn = np.sqrt(mean_squared_error(y_true, y_pred_rnn))
-        mae_rnn = mean_absolute_error(y_true, y_pred_rnn)
+        rmse_rnn = np.sqrt(mean_squared_error(y_true_clean, y_pred_rnn_clean))
+        mae_rnn = mean_absolute_error(y_true_clean, y_pred_rnn_clean)
 
         # calculo de las métricas de LSTM
-        rmse_lstm = np.sqrt(mean_squared_error(y_true, y_pred_lstm))
-        mae_lstm = mean_absolute_error(y_true, y_pred_lstm)
+        rmse_lstm = np.sqrt(mean_squared_error(y_true_clean, y_pred_lstm_clean))
+        mae_lstm = mean_absolute_error(y_true_clean, y_pred_lstm_clean)
 
         # calculo de métricas baseline
-        rmse_base = np.sqrt(mean_squared_error(y_true, y_baseline_estacional))
-        mae_base = mean_absolute_error(y_true, y_baseline_estacional)
+        rmse_base = np.sqrt(mean_squared_error(y_true_clean, y_baseline_clean))
+        mae_base = mean_absolute_error(y_true_clean, y_baseline_clean)
 
         print(" Se muestra una comparativa de las métricas")
         print(f"1. Baseline Estacional (Año Anterior) -> RMSE: {rmse_base:.2f} | MAE: {mae_base:.2f}")
