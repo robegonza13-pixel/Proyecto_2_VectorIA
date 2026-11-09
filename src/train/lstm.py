@@ -188,11 +188,8 @@ class LstmModel:
     def predecir_semanas(self, ultimos_datos_scaled):
         """Predice las próximas 4 semanas utilizando el modelo LSTM principal."""
         batch_actual = ultimos_datos_scaled[-self.length:].reshape((1, self.length, len(self.feature_cols)))
-<<<<<<< HEAD
+
         pred_scaled = self.model_lstm.predict(batch_actual)[0]  # CORREGIDO: era self.model (inexistente)
-=======
-        pred_scaled = self.model_lstm.predict(batch_actual)[0]
->>>>>>> ba4631f009f736393f092c8b3f0995524c9396bf
 
         # Desescalar la salida de las 4 semanas de casos de dengue
         dummy = np.zeros((self.horizon, len(self.feature_cols)))
