@@ -89,17 +89,19 @@ class LstmModel:
         # modelo base: contiene SimpleRNN
         print("Entrenamiento de baseline: SimpleRNN")
         self.model_rnn = Sequential(
-            [SimpleRNN(32, activation = 'relu', input_shape = (self.length, n_features)),
-             Dense(self.horizon)])
+            tf.keras.Input(shape=(self.length, n_features)),
+            SimpleRNN(32, activation = 'relu'),
+            Dense(self.horizon))
 
         self.model_rnn.compile(optimizer='adam', loss='mse')
         self.model_rnn.fit(x_train, y_train, epochs=epochs, batch_size=batch_size,
-                            validation_data=(X_test, y_test), callbacks=[early_stop], verbose=0)
+                            validation_data=(x_test, y_test), callbacks=[early_stop], verbose=0)
 
         # modelo principal: LSTM
         print("Entrenamiento del modelo LSTM")
         self.model_lstm = Sequential([
-            LSTM(64, activation='relu', return_sequences=True, input_shape=(self.length, n_features)),
+            tf.keras.Input(shape=(self.lenght, n_features)),
+            LSTM(64, activation='relu', return_sequences=True),
             LSTM(32, activation='relu'),
             Dropout(0.2),
             Dense(self.horizon)
