@@ -18,8 +18,8 @@ from .schemas import (
 
 
 class PredictCNN:
-    """Inferencia oficial para clasificación de especies de mosquitos usando MobileNetV2."""
-    def __init__(self, ruta_modelo="models/mobilenetv2_final.keras", tamano=224, es_mobilenet=True):
+    """Inferencia oficial para clasificación de especies de mosquitos usando CNN Propia."""
+    def __init__(self, ruta_modelo="models/cnn_propia.keras", tamano=224, es_mobilenet=False):
         self.ruta_modelo = ruta_modelo
         self.tamano = tamano
         self.es_mobilenet = es_mobilenet
@@ -28,7 +28,7 @@ class PredictCNN:
         self.clases = ["aedes aegypti", "aedes albopictus", "culex"]
 
     def preparar_imagen(self, imagen_bytes: bytes):
-        """Carga, convierte a RGB y escala al rango de MobileNetV2 [-1, 1]."""
+        """Carga, convierte a RGB. La CNN propia incluye Rescaling(1/255) internamente."""
         imagen = Image.open(BytesIO(imagen_bytes))
         imagen = imagen.convert("RGB")
         imagen = imagen.resize((self.tamano, self.tamano))

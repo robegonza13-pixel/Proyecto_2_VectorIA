@@ -33,19 +33,19 @@ predictor_ann: PredictANN | None = None
 
 @app.on_event("startup")
 def cargar_modelos():
-    """Carga los modelos entrenados si están disponibles en disco, priorizando MobileNetV2."""
+    """Carga los modelos entrenados si están disponibles en disco, priorizando CNN Propia."""
     global predictor_cnn, predictor_lstm, predictor_ann
     try:
-        # Prioridad absoluta al modelo de mejor rendimiento: MobileNetV2
-        if Path("models/mobilenetv2_final.keras").exists():
+        # Prioridad: CNN Propia (modelo desde cero entrenado en el proyecto)
+        if Path("models/cnn_propia.keras").exists():
+            predictor_cnn = PredictCNN("models/cnn_propia.keras", tamano=224, es_mobilenet=False)
+            print("✓ Modelo oficial cargado en API: CNN Propia")
+        elif Path("models/mobilenetv2_final.keras").exists():
             predictor_cnn = PredictCNN("models/mobilenetv2_final.keras", tamano=224, es_mobilenet=True)
-            print("✓ Modelo oficial cargado en API: MobileNetV2 Final")
+            print("✓ Modelo cargado en API: MobileNetV2 Final")
         elif Path("models/mobilenetv2_fase1.keras").exists():
             predictor_cnn = PredictCNN("models/mobilenetv2_fase1.keras", tamano=224, es_mobilenet=True)
             print("✓ Modelo cargado en API: MobileNetV2 Fase 1")
-        elif Path("models/cnn_propia.keras").exists():
-            predictor_cnn = PredictCNN("models/cnn_propia.keras", tamano=224, es_mobilenet=False)
-            print("✓ Modelo cargado en API: CNN Propia")
 
         if Path("models/lstm_casos.keras").exists() and Path("models/scaler_lstm.joblib").exists():
             predictor_lstm = PredictLSTM("models/lstm_casos.keras", "models/scaler_lstm.joblib")
@@ -65,7 +65,7 @@ def estado():
     return {
         "sistema": "VectorIA API",
         "estado": "operativo",
-        "modelo_cnn": "MobileNetV2 Transfer Learning",
+        "modelo_cnn": "CNN Propia (desde cero con bloques de atención)",
         "aviso_etico": "Herramienta de apoyo a la vigilancia epidemiológica; no diagnostica dengue en personas.",
     }
 
