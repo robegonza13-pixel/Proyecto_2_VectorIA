@@ -13,3 +13,5 @@ uvicorn
 python-multipart
 streamlit
 plotly
+
+requests

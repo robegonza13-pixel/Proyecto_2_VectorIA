@@ -1,20 +1,18 @@
-import os
 from pathlib import Path
-from io import BytesIO
 import json
 from datetime import timedelta
 import streamlit as st
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from PIL import Image
-from tensorflow import keras
-import joblib
+import requests
 
 # ---------------------------------------------------------
-# 1. Configuración de página y Encabezado
+# 1. Configuración de API y Página
 # ---------------------------------------------------------
+API_URL = "http://127.0.0.1:8000"  # Asegúrate de que FastAPI corra aquí
+
 st.set_page_config(
     page_title="VectorIA - Vigilancia del Dengue",
     page_icon="🦟",
@@ -46,16 +44,17 @@ if 'especie_prob' not in st.session_state:
     st.session_state['especie_prob'] = 0.0
 if 'aegypti_detectado' not in st.session_state:
     st.session_state['aegypti_detectado'] = 0
-if 'casos_pred_4sem' not in st.session_state:
-    st.session_state['casos_pred_4sem'] = 350.0
-if 'casos_umbral_endemico' not in st.session_state:
-    st.session_state['casos_umbral_endemico'] = 280.0
-if 'temp_max_hist' not in st.session_state:
-    st.session_state['temp_max_hist'] = 28.5
-if 'lluvia_14d_hist' not in st.session_state:
-    st.session_state['lluvia_14d_hist'] = 45.0
-if 'humedad_hist' not in st.session_state:
-    st.session_state['humedad_hist'] = 80.0
+
+if 'casos_sim' not in st.session_state:
+    st.session_state['casos_sim'] = 350
+if 'umbral_sim' not in st.session_state:
+    st.session_state['umbral_sim'] = 280
+if 'temp_max_sim' not in st.session_state:
+    st.session_state['temp_max_sim'] = 28.5
+if 'lluvia_sim' not in st.session_state:
+    st.session_state['lluvia_sim'] = 45.0
+if 'humedad_sim' not in st.session_state:
+    st.session_state['humedad_sim'] = 80.0
 
 # ---------------------------------------------------------
 # 3. Pestañas de la Aplicación
@@ -83,63 +82,45 @@ with tab1:
         archivo_subido = st.file_uploader("Subir foto del espécimen o microscopio", type=['jpg', 'jpeg', 'png'])
         if archivo_subido is not None:
             img_pil = Image.open(archivo_subido).convert("RGB")
-            st.image(img_pil, caption="Fotografía cargada", use_column_width=True)
+            st.image(img_pil, caption="Fotografía cargada", use_container_width=True)
 
     with col_img2:
         if archivo_subido is not None:
             if st.button("🔍 Identificar Especie", type="primary"):
-                with st.spinner("Analizando características anatómicas con la red convolucional..."):
-                    BASE_DIR = Path(__file__).resolve().parent.parent  # ajusta si Home.py no vive en app/
-                    MODELS_DIR = BASE_DIR / "models"
+                with st.spinner("Enviando imagen a la API para análisis convolucional..."):
+                    try:
+                        archivos = {
+                            "imagen": (archivo_subido.name, archivo_subido.getvalue(), archivo_subido.type)
+                        }
+                        res = requests.post(f"{API_URL}/predict/mosquito", files=archivos)
 
-                    ruta_clases = MODELS_DIR / "clases_cnn.json"
-                    if ruta_clases.exists():
-                        clases = json.loads(ruta_clases.read_text(encoding="utf-8"))
-                    else:
-                        clases = ["Aedes aegypti", "Aedes albopictus", "Culex"]
+                        if res.status_code == 200:
+                            data = res.json()
+                            especie = data["especie"]
+                            confianza = data["probabilidad"]
+                            es_aegypti = data["aegypti_detectado"]
 
-                    modelo_cargado = None
-                    nombre_modelo_activo = "Demostración referencial"
-                    # Prioridad por mejor F1: MobileNetV2 primero, CNN propia como respaldo
-                    for ruta, nombre in [
-                        (MODELS_DIR / 'mobilenetv2_final.keras', 'MobileNetV2 Fine-Tuned (mejor F1)'),
-                        (MODELS_DIR / 'cnn_propia.keras', 'CNN Propia (respaldo)'),
-                        (MODELS_DIR / 'mobilenetv2_fase1.keras', 'MobileNetV2 Fase 1'),
-                    ]:
-                        if ruta.exists():
-                            try:
-                                modelo_cargado = keras.models.load_model(str(ruta))
-                                nombre_modelo_activo = nombre
-                                break
-                            except Exception:
-                                pass
+                            st.session_state['especie_nombre'] = especie
+                            st.session_state['especie_prob'] = confianza
+                            st.session_state['aegypti_detectado'] = es_aegypti
 
-                    if modelo_cargado is not None:
-                        # Ambos modelos reescalan internamente (Rescaling); se envía 0-255 crudo
-                        img_resized = img_pil.resize((224, 224))
-                        arr = np.array(img_resized, dtype=np.float32)
-                        entrada = np.expand_dims(arr, axis=0)
-                        probabilidades = modelo_cargado.predict(entrada, verbose=0)[0]
-                        idx_max = int(np.argmax(probabilidades))
-                        especie = clases[idx_max]
-                        confianza = float(probabilidades[idx_max])
-                    else:
-                        especie = "Aedes aegypti"
-                        confianza = 0.932
+                            if es_aegypti == 1:
+                                st.error(
+                                    f"🚨 **Vector Primario Detectado:** {especie.capitalize()} ({confianza * 100:.1f}% certeza)")
+                                st.warning("⚠️ *Aedes aegypti* representa alto riesgo de transmisión comunitaria.")
+                            else:
+                                st.success(
+                                    f"✓ **Especie Identificada:** {especie.capitalize()} ({confianza * 100:.1f}% certeza)")
 
-                    es_aegypti = 1 if "aegypti" in especie.lower() else 0
-                    st.session_state['especie_nombre'] = especie
-                    st.session_state['especie_prob'] = confianza
-                    st.session_state['aegypti_detectado'] = es_aegypti
+                            st.info("💡 Este resultado se ha vinculado automáticamente al Módulo 3 de Recomendaciones.")
+                        else:
+                            st.error(f"Error de la API ({res.status_code}): {res.text}")
 
-                    if es_aegypti == 1:
-                        st.error(f"🚨 **Vector Primario Detectado:** {especie} ({confianza * 100:.1f}% certeza)")
-                        st.warning("⚠️ *Aedes aegypti* representa alto riesgo de transmisión comunitaria.")
-                    else:
-                        st.success(f"✓ **Especie Identificada:** {especie} ({confianza * 100:.1f}% certeza)")
-
-                    st.info("💡 Este resultado se ha vinculado automáticamente al Módulo 3 de Recomendaciones.")
-                    st.caption(f"🔬 Inferencia ejecutada con: **{nombre_modelo_activo}**")
+                    except requests.exceptions.ConnectionError:
+                        st.error(
+                            "🚨 No se pudo conectar con el servidor backend (FastAPI). Verifica que esté encendido.")
+                    except Exception as e:
+                        st.error(f"Ocurrió un error inesperado: {str(e)}")
 
 # =========================================================
 # PESTAÑA 2: LSTM (Pronóstico a 4 Semanas)
@@ -155,7 +136,7 @@ with tab2:
     if Path(ruta_csv_nacional).exists():
         df_nac = pd.read_csv(ruta_csv_nacional)
         df_nac['fecha_inicio_semana'] = pd.to_datetime(df_nac['fecha_inicio_semana'])
-        
+
         fechas_disponibles = df_nac['fecha_inicio_semana'].dt.date.tolist()
         fecha_elegida = st.select_slider(
             "Seleccionar semana epidemiológica de consulta:",
@@ -170,77 +151,66 @@ with tab2:
             st.metric("Año Epidemiológico", int(fila_ref['anio']))
             st.metric("Semana Epi", int(fila_ref['semana_epi']))
             st.metric("Casos Reportados en Semana", int(fila_ref['casos_dengue']))
-            
-            # Guardamos clima de referencia en la sesión
-            st.session_state['temp_max_hist'] = float(fila_ref['temp_max_c'])
-            st.session_state['lluvia_14d_hist'] = float(fila_ref['lluvia_mm'] * 2.0)
-            st.session_state['humedad_hist'] = float(fila_ref['humedad_rel_pct'])
+
+            st.session_state['temp_max_sim'] = float(fila_ref['temp_max_c'])
+            st.session_state['lluvia_sim'] = float(fila_ref['lluvia_mm'] * 2.0)
+            st.session_state['humedad_sim'] = float(fila_ref['humedad_rel_pct'])
 
         with col_lstm2:
             if st.button("📊 Generar Pronóstico a 4 Semanas", type="primary"):
-                # Cálculo de umbral endémico histórico para esa semana
-                casos_sem = df_nac[df_nac['semana_epi'] == fila_ref['semana_epi']]['casos_dengue']
-                umbral_75 = float(np.percentile(casos_sem, 75))
+                with st.spinner("Consultando pronóstico al modelo LSTM en el backend..."):
+                    casos_proy = []
+                    umbral_75 = 0.0
 
-                # Intentamos usar el modelo entrenado
-                # El scaler_lstm fue entrenado con 24 features (5 base + 3 temporales + 16 rezagos)
-                FEATS_BASE = ['casos_dengue', 'lluvia_mm', 'temp_max_c', 'temp_min_c', 'humedad_rel_pct']
-                FEATS_TEMP = ['semana_sin', 'semana_cos', 'semana_epi']
-                FEATS_LAG = [f'{c}_lag{l}' for c in ['lluvia_mm', 'temp_max_c', 'temp_min_c', 'humedad_rel_pct'] for l in [1, 2, 3, 4]]
-                COLS_LSTM = FEATS_BASE + FEATS_TEMP + FEATS_LAG  # 24 columnas
-
-                casos_proy = []
-                if Path('models/lstm_casos.keras').exists() and Path('models/scaler_lstm.joblib').exists():
                     try:
-                        modelo_lstm = keras.models.load_model('models/lstm_casos.keras')
-                        scaler_lstm = joblib.load('models/scaler_lstm.joblib')
-                        idx_corte = df_nac[df_nac['fecha_inicio_semana'].dt.date == fecha_elegida].index[0]
-                        # Ampliamos para poder calcular lag4
-                        inicio_ext = max(0, idx_corte - 26 - 4)
-                        df_ext = df_nac.iloc[inicio_ext:idx_corte].copy()
-                        df_ext['semana_sin'] = np.sin(2 * np.pi * df_ext['semana_epi'] / 52.0)
-                        df_ext['semana_cos'] = np.cos(2 * np.pi * df_ext['semana_epi'] / 52.0)
-                        for col in ['lluvia_mm', 'temp_max_c', 'temp_min_c', 'humedad_rel_pct']:
-                            for lag in [1, 2, 3, 4]:
-                                df_ext[f'{col}_lag{lag}'] = df_ext[col].shift(lag)
-                        df_ext = df_ext.dropna(subset=COLS_LSTM).tail(26)
-                        vent_scaled = scaler_lstm.transform(df_ext[COLS_LSTM].values)
-                        pred_scaled = modelo_lstm.predict(np.expand_dims(vent_scaled, axis=0), verbose=0)[0]
-                        dummy = np.zeros((4, len(COLS_LSTM)))
-                        dummy[:, 0] = pred_scaled
-                        casos_proy = np.maximum(0, scaler_lstm.inverse_transform(dummy)[:, 0]).round(1).tolist()
-                    except Exception as e_lstm:
-                        st.caption(f"⚠️ LSTM no disponible ({e_lstm}). Usando proyección de referencia.")
+                        payload = {"fecha_inicio": str(fecha_elegida)}
+                        res = requests.post(f"{API_URL}/predict/casos", json=payload)
 
-                if not casos_proy:
-                    base_c = float(fila_ref['casos_dengue'])
-                    casos_proy = [round(base_c * f, 1) for f in [1.08, 1.15, 1.22, 1.18]]
+                        if res.status_code == 200:
+                            data = res.json()
+                            casos_proy = data["casos_pronosticados"]
+                            fechas_proy = data["fechas"]
+                            suma_4sem = data["casos_pred_4sem"]
+                            umbral_75 = data["casos_umbral_endemico"]
+                            st.success("Pronóstico cargado desde el microservicio LSTM.")
+                        else:
+                            st.warning(f"API retornó error {res.status_code}. Generando proyección referencial.")
+                            raise ValueError("API Error")
 
-                fechas_proy = [fecha_elegida + timedelta(weeks=i + 1) for i in range(4)]
-                suma_4sem = float(sum(casos_proy))
-                st.session_state['casos_pred_4sem'] = suma_4sem
-                st.session_state['casos_umbral_endemico'] = umbral_75
+                    except Exception as e:
+                        base_c = float(fila_ref['casos_dengue'])
+                        casos_proy = [round(base_c * f, 1) for f in [1.08, 1.15, 1.22, 1.18]]
+                        fechas_proy = [(fecha_elegida + timedelta(weeks=i + 1)).strftime('%Y-%m-%d') for i in range(4)]
+                        suma_4sem = float(sum(casos_proy))
 
-                fig_proy = go.Figure()
-                fig_proy.add_trace(go.Bar(
-                    x=[f"Sem +{i+1}\n({fechas_proy[i]})" for i in range(4)],
-                    y=casos_proy,
-                    name="Casos Pronosticados (LSTM)",
-                    marker_color="#2b5c8f"
-                ))
-                fig_proy.add_trace(go.Scatter(
-                    x=[f"Sem +{i+1}\n({fechas_proy[i]})" for i in range(4)],
-                    y=[umbral_75 / 4.0] * 4,
-                    mode="lines",
-                    name="Umbral Endémico Semanal (P75)",
-                    line=dict(color="red", dash="dash", width=2)
-                ))
-                fig_proy.update_layout(
-                    title=f"Proyección Total 4 Semanas: {suma_4sem:.0f} casos (Umbral: {umbral_75:.0f})",
-                    yaxis_title="Casos Estimados",
-                    margin=dict(l=20, r=20, t=40, b=20)
-                )
-                st.plotly_chart(fig_proy, use_container_width=True)
+                        casos_sem = df_nac[df_nac['semana_epi'] == fila_ref['semana_epi']]['casos_dengue']
+                        import numpy as np
+
+                        umbral_75 = float(np.percentile(casos_sem, 75))
+
+                    st.session_state['casos_sim'] = int(suma_4sem)
+                    st.session_state['umbral_sim'] = int(umbral_75)
+
+                    fig_proy = go.Figure()
+                    fig_proy.add_trace(go.Bar(
+                        x=[f"Sem +{i + 1}\n({fechas_proy[i]})" for i in range(4)],
+                        y=casos_proy,
+                        name="Casos Pronosticados (LSTM)",
+                        marker_color="#2b5c8f"
+                    ))
+                    fig_proy.add_trace(go.Scatter(
+                        x=[f"Sem +{i + 1}\n({fechas_proy[i]})" for i in range(4)],
+                        y=[umbral_75 / 4.0] * 4,
+                        mode="lines",
+                        name="Umbral Endémico Semanal (P75)",
+                        line=dict(color="red", dash="dash", width=2)
+                    ))
+                    fig_proy.update_layout(
+                        title=f"Proyección Total 4 Semanas: {suma_4sem:.0f} casos (Umbral: {umbral_75:.0f})",
+                        yaxis_title="Casos Estimados",
+                        margin=dict(l=20, r=20, t=40, b=20)
+                    )
+                    st.plotly_chart(fig_proy, use_container_width=True)
     else:
         st.warning("Coloque el archivo 'data/raw/vectoria_dengue_nacional_real.csv' para activar el pronóstico.")
 
@@ -258,14 +228,15 @@ with tab3:
     col_ann1, col_ann2 = st.columns(2)
 
     with col_ann1:
-        casos_sim = st.slider("Casos Pronosticados (próximas 4 semanas)", 0, 3000, int(st.session_state['casos_pred_4sem']))
-        umbral_sim = st.slider("Umbral Endémico de Referencia (4 semanas)", 100, 2000, int(st.session_state['casos_umbral_endemico']))
-        lluvia_sim = st.slider("Lluvia acumulada 14 días (mm)", 0.0, 300.0, float(st.session_state['lluvia_14d_hist']))
+        # Los sliders usan 'key' para enlazarse con la sesión y arrancan de cero
+        casos_sim = st.slider("Casos Pronosticados (próximas 4 semanas)", 0, 5000, key="casos_sim")
+        umbral_sim = st.slider("Umbral Endémico de Referencia (4 semanas)", 0, 5000, key="umbral_sim")
+        lluvia_sim = st.slider("Lluvia acumulada 14 días (mm)", 0.0, 1000.0, key="lluvia_sim")
 
     with col_ann2:
-        temp_max_sim = st.slider("Temperatura Máxima (°C)", 20.0, 42.0, float(st.session_state['temp_max_hist']))
-        temp_min_sim = st.slider("Temperatura Mínima (°C)", 14.0, 28.0, 20.0)
-        humedad_sim = st.slider("Humedad Relativa (%)", 40.0, 100.0, float(st.session_state['humedad_hist']))
+        temp_max_sim = st.slider("Temperatura Máxima (°C)", 10.0, 45.0, key="temp_max_sim")
+        temp_min_sim = st.slider("Temperatura Mínima (°C)", 10.0, 30.0, value=20.0)
+        humedad_sim = st.slider("Humedad Relativa (%)", 0.0, 100.0, key="humedad_sim")
 
         aegypti_opcion = st.radio(
             "¿Aedes aegypti detectado?",
@@ -275,45 +246,59 @@ with tab3:
         aegypti_val = 1 if "Sí" in aegypti_opcion else 0
 
     if st.button("🛡️ Evaluar Acción Preventiva", type="primary"):
-        clases_ann = ["alerta_sanitaria", "eliminacion_criaderos", "fumigacion_focalizada", "monitoreo_normal"]
-        recomendacion = "monitoreo_normal"
+        with st.spinner("Consultando motor de decisiones ANN en el backend..."):
+            recomendacion = "monitoreo_normal"
+            motivo_texto = ""
 
-        # Carga del modelo entrenado
-        if Path('models/ann.h5').exists() and Path('models/scaler_ann.pkl').exists():
             try:
-                mod_ann = keras.models.load_model('models/ann.h5')
-                sc_ann = joblib.load('models/scaler_ann.pkl')
-                vec = np.array([[casos_sim, umbral_sim, lluvia_sim, temp_max_sim, temp_min_sim, humedad_sim, aegypti_val]], dtype=float)
-                vec_sc = sc_ann.transform(vec)
-                probs = mod_ann.predict(vec_sc, verbose=0)[0]
-                recomendacion = clases_ann[int(np.argmax(probs))]
+                payload_ann = {
+                    "casos_pred_4sem": float(casos_sim),
+                    "casos_umbral_endemico": float(umbral_sim),
+                    "lluvia_14d_mm": float(lluvia_sim),
+                    "temp_max": float(temp_max_sim),
+                    "temp_min": float(temp_min_sim),
+                    "humedad": float(humedad_sim),
+                    "aegypti_detectado": int(aegypti_val)
+                }
+
+                res = requests.post(f"{API_URL}/predict/accion", json=payload_ann)
+
+                if res.status_code == 200:
+                    data = res.json()
+                    recomendacion = data["recomendacion"]
+                    motivo_texto = data["motivo"]
+                else:
+                    st.warning(
+                        f"La API no respondió correctamente ({res.status_code}). Aplicando reglas de respaldo...")
+                    raise ValueError("Fallo API")
+
             except Exception as e:
-                st.warning(f"Error en inferencia ANN: {e}. Aplicando motor de reglas de respaldo...")
+                if casos_sim > 2 * umbral_sim:
+                    recomendacion = "alerta_sanitaria"
+                    motivo_texto = f"Los casos proyectados ({casos_sim}) superan el doble del umbral endémico ({umbral_sim}). Se requiere movilización urgente de recursos hospitalarios."
+                elif casos_sim > umbral_sim and aegypti_val == 1:
+                    recomendacion = "fumigacion_focalizada"
+                    motivo_texto = f"Casos proyectados ({casos_sim}) superan el umbral endémico ({umbral_sim}) con presencia confirmada de Aedes aegypti."
+                elif lluvia_sim > 80.0 and temp_max_sim > 27.0:
+                    recomendacion = "eliminacion_criaderos"
+                    motivo_texto = f"Condiciones climáticas críticas (Lluvia: {lluvia_sim:.1f} mm, Temp: {temp_max_sim:.1f} °C) propician eclosión masiva."
+                else:
+                    recomendacion = "monitoreo_normal"
+                    motivo_texto = "Los indicadores epidemiológicos y climáticos se mantienen dentro de los rangos de seguridad."
 
-        # Motor de reglas de respaldo en caso de fallo
-        if recomendacion not in clases_ann:
-            if casos_sim > 2 * umbral_sim:
-                recomendacion = "alerta_sanitaria"
-            elif casos_sim > umbral_sim and aegypti_val == 1:
-                recomendacion = "fumigacion_focalizada"
-            elif lluvia_sim > 80.0 and temp_max_sim > 27.0:
-                recomendacion = "eliminacion_criaderos"
+            st.markdown("---")
+            if recomendacion == "alerta_sanitaria":
+                st.error("🚨 **ACCIÓN PRIORITARIA: ALERTA SANITARIA NACIONAL / CANTONAL**")
+                st.markdown(f"**Motivo:** {motivo_texto}")
+            elif recomendacion == "fumigacion_focalizada":
+                st.warning("💨 **ACCIÓN PRIORITARIA: FUMIGACIÓN FOCALIZADA ULV**")
+                st.markdown(f"**Motivo:** {motivo_texto}")
+            elif recomendacion == "eliminacion_criaderos":
+                st.info("🧹 **ACCIÓN PRIORITARIA: CAMPAÑA DE ELIMINACIÓN DE CRIADEROS**")
+                st.markdown(f"**Motivo:** {motivo_texto}")
             else:
-                recomendacion = "monitoreo_normal"
-
-        st.markdown("---")
-        if recomendacion == "alerta_sanitaria":
-            st.error("🚨 **ACCIÓN PRIORITARIA: ALERTA SANITARIA NACIONAL / CANTONAL**")
-            st.markdown(f"**Motivo:** Los casos proyectados (**{casos_sim}**) superan el doble del umbral endémico (**{umbral_sim}**). Se requiere movilización urgente de recursos hospitalarios.")
-        elif recomendacion == "fumigacion_focalizada":
-            st.warning("💨 **ACCIÓN PRIORITARIA: FUMIGACIÓN FOCALIZADA ULV**")
-            st.markdown(f"**Motivo:** Casos proyectados (**{casos_sim}**) superan el umbral endémico (**{umbral_sim}**) con presencia confirmada de *Aedes aegypti*.")
-        elif recomendacion == "eliminacion_criaderos":
-            st.info("🧹 **ACCIÓN PRIORITARIA: CAMPAÑA DE ELIMINACIÓN DE CRIADEROS**")
-            st.markdown(f"**Motivo:** Condiciones climáticas críticas (Lluvia: **{lluvia_sim:.1f} mm**, Temp: **{temp_max_sim:.1f} °C**) propician la eclosión masiva de larvas.")
-        else:
-            st.success("📋 **ACCIÓN PRIORITARIA: MONITOREO Y VIGILANCIA NORMAL**")
-            st.markdown("**Motivo:** Los indicadores epidemiológicos y climáticos se mantienen dentro de los rangos de seguridad.")
+                st.success("📋 **ACCIÓN PRIORITARIA: MONITOREO Y VIGILANCIA NORMAL**")
+                st.markdown(f"**Motivo:** {motivo_texto}")
 
 # =========================================================
 # PESTAÑA 4: MAPA DE CALOR CANTONAL
@@ -354,4 +339,5 @@ with tab4:
         except Exception as e:
             st.error(f"Error al renderizar el mapa: {e}")
     else:
-        st.warning("Asegúrese de contar con 'vectoria_casos_cantonal_anual_real.csv' y 'costaricacantones.geojson' en 'data/raw/'.")
+        st.warning(
+            "Asegúrese de contar con 'vectoria_casos_cantonal_anual_real.csv' y 'costaricacantones.geojson' en 'data/raw/'.")
