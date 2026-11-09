@@ -37,6 +37,19 @@ A continuación se presentan 4 prompts reales representativos utilizados durante
 > *"Tengo un archivo vectoria_casos_cantonal_anual_real.csv con casos por cantón y año, y un archivo costaricacantones.geojson. ¿Cómo genero en Streamlit un mapa coroplético interactivo con Plotly Express donde el usuario filtre por año y la escala de color refleje los casos reportados?"*
 * **Propósito:** Implementar la visualización geoespacial interactiva de la Pestaña 4 de la aplicación web.
 
+### Prompt 5: Estoy teniendo problemas al obtener los resultados de las métricas, sale que hay valores nulos (Módulo 2 - LSTM)
+> *"Muestrame cómo puedo manejar correctamente los rezagos y las transformaciones estacionales sin perder filas o que se generen valores nulos que interrumpan el entrenamiento."
+* **Propósito:** Prevenir y limpiar la perdida de datos y la aparación de valores vacíos.
+
+### Prompt 6: Integración del baseline estacional
+> *"Dime cómo puedo diseñar el baseline estacional que utilice los datos historicos de 52 semanas atrás para poder compararlo con las predicciones de SimpleRNN y LSTM."
+* **Propósito:** Registrar la validación y comparación utilizado para el valorar predictivo de cada modelo.
+
+### Prompt 7: Revisión de la lógica del método evaluar métricas
+> *"Sigue dando un error al evaluar las métricas, donde los datos pasan a cero. Revisa nuevamente la lógica de la máscara, los valores nulos y si es necesario agrega una estructura antifallos."
+* **Propósito:** Revisión del proceso de pruebas, depuración y validación del código.
+
+
 ---
 
 ## 3. Modificaciones y Adaptaciones al Código Asistido por IA
@@ -51,6 +64,12 @@ El código sugerido por las herramientas de IA nunca fue adoptado a ciegas; requ
    - La IA planteó 8 variables de entrada en el endpoint; no obstante, al entrenar el modelo definitivo en el notebook se demostró que prescindir de `semana_epi` mejoraba la capacidad de generalización. Ajustamos `COLUMNAS_ANN` en `predict.py` y en el script de Streamlit para que coincidiera exactamente con las 7 columnas del escalador `scaler_ann.pkl`.
 4. **Manejo de rutas relativas y carpetas:**
    - Se blindaron los métodos de guardado (`.save()`, `joblib.dump()`) agregando `Path('models').mkdir(parents=True, exist_ok=True)` para garantizar compatibilidad tanto en entornos locales de Windows como en Google Colab y contenedores Docker.
+5. **Integración de un filtro para el control de rezagos:**
+   - La IA incorporó un filtrado y limpieza controlado (`.dropna()`) al generar el rezago de 1 a 4 semanas (`lags`) y componentes trigonometricos de la semana epideologica (`semana_sin`, `semana_cos`).
+6. **Sincronización del baseline:**
+   - Se ajustó e implmentó la lógica de persistencia historica de las 52 semanas atrás (`target_historical_idx = abs_idx - 52`), donde construyo un arreglo para asegurar una comparativa entre cada modelo.
+7. **Control de fallos:**
+   - La IA reestruturó la validación incluyendo una red de seguridad con `np.nan_to_num`, mascaras y una condición de respaldo (`if len(y_true_clean) == 0`) para evitar un colapso al calcular rmse y mae.
 
 ---
 
