@@ -1,14 +1,12 @@
 
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import SimpleRNN, LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.preprocessing.sequence import TimeseriesGenerator
+
 
 
 class LstmModel:
@@ -21,46 +19,46 @@ class LstmModel:
         self.scaled_train = None
         self.scaled_test = None
         self.feature_cols = None
+        self.test_size = None  # nuevo: para que evaluar_metricas no necesite que se lo repitas
 
         # modelos
         self.model_rnn = None
         self.model_lstm = None
 
-    def preparar_datos(self, df, test_size=104, usar_lags = True):
+    def preparar_datos(self, df, test_size=104, usar_lags=True):
         # se prepara un dataframe: creando rezagos del clima y variables temporales
         self.df = df.sort_values('fecha_inicio_semana').reset_index(drop=True).copy()
-
-        # asegura el formato de la fecha sea date para extraer los componentes
-        self.df['fecha_inicio_semana'] = pd.to_datetime(df['fecha_inicio_semana'])
+        self.df['fecha_inicio_semana'] = pd.to_datetime(self.df['fecha_inicio_semana'])
+        self.test_size = test_size
 
         # se crea un componente temporal donde se verifica si cumple la instruccion de usar la fecha
-        if 'semana_epi' in df.columns:
-            df['semana_sin'] = np.sin(2 * np.pi * df['semana_epi'] / 52.0)
-            df['semana_cos'] = np.cos(2 * np.pi * df['semana_epi'] / 52.0)
+        if 'semana_epi' in self.df.columns:
+            self.df['semana_sin'] = np.sin(2 * np.pi * self.df['semana_epi'] / 52.0)
+            self.df['semana_cos'] = np.cos(2 * np.pi * self.df['semana_epi'] / 52.0)
 
         # se crean los rezagos del clima y selecciona las columnas del csv que tienen relación
         if usar_lags:
             features_to_lag = ['lluvia_mm', 'temp_max_c', 'temp_min_c', 'humedad_rel_pct']
             for col in features_to_lag:
                 for lag in [1, 2, 3, 4]:
-                    df[f'{col}_lag{lag}'] = df[col].shift(lag)
+                    self.df[f'{col}_lag{lag}'] = self.df[col].shift(lag)
 
-        self.df = df.dropna().reset_index(drop=True)
+        self.df = self.df.dropna().reset_index(drop=True)
 
         # se definen las columnas de entrada
         base_cols = ['casos_dengue', 'lluvia_mm', 'temp_max_c', 'temp_min_c', 'humedad_rel_pct']
-        temporal = [c for c in ['semana_sin', 'semana_cos', 'semana_epi'] if c in df.columns]
-        lag_cols = [col for col in df.columns if 'lag' in col]
+        temporal = [c for c in ['semana_sin', 'semana_cos', 'semana_epi'] if c in self.df.columns]
+        lag_cols = [col for col in self.df.columns if 'lag' in col]
 
         self.feature_cols = base_cols + temporal + lag_cols
 
-        data_values = df[self.feature_cols].values
+        data_values = self.df[self.feature_cols].values
 
         # Split train / test
         train_data = data_values[:-test_size]
         test_data = data_values[-test_size:]
 
-        # escalado con train ( esto evita que ocurra una fuga de datos)
+        # escalado con train (esto evita que ocurra una fuga de datos)
         self.scaler.fit(train_data)
         scaled_train = self.scaler.transform(train_data)
         scaled_test = self.scaler.transform(test_data)
@@ -94,7 +92,7 @@ class LstmModel:
 
         self.model_rnn.compile(optimizer='adam', loss='mse')
         self.model_rnn.fit(x_train, y_train, epochs=epochs, batch_size=batch_size,
-                            validation_data=(X_test, y_test), callbacks=[early_stop], verbose=0)
+                           validation_data=(x_test, y_test), callbacks=[early_stop], verbose=0)
 
         # modelo principal: LSTM
         print("Entrenamiento del modelo LSTM")
@@ -115,7 +113,9 @@ class LstmModel:
 
         return history_lstm
 
-    def evaluar_metricas(self, scaled_test, test_size=104):
+    def evaluar_metricas(self, scaled_test, test_size=None):
+        if test_size is None:
+            test_size = self.test_size
         # calcula las métricas rmse y mae
         x_test, y_test_scaled = self.crear_secuencias(scaled_test)
 
