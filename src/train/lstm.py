@@ -1,7 +1,6 @@
 
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import tensorflow as tf
 
 from sklearn.preprocessing import MinMaxScaler
@@ -9,203 +8,183 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import SimpleRNN, LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.preprocessing.sequence import TimeseriesGenerator
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 
 class LstmModel:
-    def __init__(self, filepath, length=26, horizon=4):
-        self.filepath = filepath
+    def __init__(self, length=26, horizon=4):
         self.length = length  # ventana de 26 semanas
         self.horizon = horizon  # predicción de las próximas 4 semanas
-        self.scaler = MinMaxScaler()
+        self.scaler_x = MinMaxScaler()
+        self.scaler_y = MinMaxScaler()
         self.df = None
-        self.scaled_train = None
-        self.scaled_test = None
         self.feature_cols = None
 
-        # modelos
         self.model_rnn = None
         self.model_lstm = None
 
-    def preparar_datos(self, df, test_size=104, usar_lags = True):
-        # se prepara un dataframe: creando rezagos del clima y variables temporales
-        self.df = df.sort_values('fecha_inicio_semana').reset_index(drop=True).copy()
+    def preparar_datos(self, df, test_size=104, usar_lags=True):
+        # se trabaja sobre una copia limpia del DataFrame
+        data = df.sort_values('fecha_inicio_semana').reset_index(drop=True).copy()
+        data['fecha_inicio_semana'] = pd.to_datetime(data['fecha_inicio_semana'])
 
-        # asegura el formato de la fecha sea date para extraer los componentes
-        self.df['fecha_inicio_semana'] = pd.to_datetime(df['fecha_inicio_semana'])
+        # contiene los componentes temporales a traves de transacciones trigometricas
+        if 'semana_epi' in data.columns:
+            data['semana_sin'] = np.sin(2 * np.pi * data['semana_epi'] / 52.0)
+            data['semana_cos'] = np.cos(2 * np.pi * data['semana_epi'] / 52.0)
 
-        # se crea un componente temporal donde se verifica si cumple la instruccion de usar la fecha
-        if 'semana_epi' in df.columns:
-            df['semana_sin'] = np.sin(2 * np.pi * df['semana_epi'] / 52.0)
-            df['semana_cos'] = np.cos(2 * np.pi * df['semana_epi'] / 52.0)
-
-        # se crean los rezagos del clima y selecciona las columnas del csv que tienen relación
+        # creación de rezagos climaticos, para capturar los efectos que se retardaron
         if usar_lags:
             features_to_lag = ['lluvia_mm', 'temp_max_c', 'temp_min_c', 'humedad_rel_pct']
             for col in features_to_lag:
-                for lag in [1, 2, 3, 4]:
-                    df[f'{col}_lag{lag}'] = df[col].shift(lag)
+                if col in data.columns:
+                    for lag in [1, 2, 3, 4]:
+                        data[f'{col}_lag{lag}'] = data[col].shift(lag)
 
-        self.df = df.dropna().reset_index(drop=True)
+        # eliminación de valores nulos genrados por la desfase temporal
+        self.df = data.dropna().reset_index(drop=True)
 
-        # se definen las columnas de entrada
         base_cols = ['casos_dengue', 'lluvia_mm', 'temp_max_c', 'temp_min_c', 'humedad_rel_pct']
-        temporal = [c for c in ['semana_sin', 'semana_cos', 'semana_epi'] if c in df.columns]
-        lag_cols = [col for col in df.columns if 'lag' in col]
+        base_cols = [c for c in base_cols if c in self.df.columns]
+        temporal = [c for c in ['semana_sin', 'semana_cos', 'semana_epi'] if c in self.df.columns]
+        lag_cols = [c for c in self.df.columns if 'lag' in c]
 
         self.feature_cols = base_cols + temporal + lag_cols
 
-        data_values = df[self.feature_cols].values
+        X_raw = self.df[self.feature_cols].values
+        Y_raw = self.df[['casos_dengue']].values
 
-        # Split train / test
-        train_data = data_values[:-test_size]
-        test_data = data_values[-test_size:]
+        # contiene la división (split) secuencial incluyendo la ventana previa en el test
+        train_size = len(self.df) - test_size
 
-        # escalado con train ( esto evita que ocurra una fuga de datos)
-        self.scaler.fit(train_data)
-        scaled_train = self.scaler.transform(train_data)
-        scaled_test = self.scaler.transform(test_data)
+        X_train_raw = X_raw[:train_size]
+        X_test_raw = X_raw[train_size - self.length:]
 
-        return scaled_train, scaled_test
+        Y_train_raw = Y_raw[:train_size]
+        Y_test_raw = Y_raw[train_size - self.length:]
 
-    def crear_secuencias(self, data):
-        #genera secuencias temporales para el modelo
+        # escalado independiente para evitar que ocurran fujas de datos
+        # (se ajusta solamente con los datos de entrenamiento)
+        scaled_x_train = self.scaler_x.fit_transform(X_train_raw)
+        scaled_x_test = self.scaler_x.transform(X_test_raw)
+
+        scaled_y_train = self.scaler_y.fit_transform(Y_train_raw)
+        scaled_y_test = self.scaler_y.transform(Y_test_raw)
+
+        return scaled_x_train, scaled_y_train, scaled_x_test, scaled_y_test
+
+    def crear_secuencias(self, data_x, data_y):
+        # genera secuencias temporales en el modelo
         x, y = [], []
-        target_idx = 0  # 'casos_dengue' está en la columna 0
-
-        for i in range(len(data) - self.length - self.horizon + 1):
-            x.append(data[i: i + self.length])
-            y.append(data[i + self.length: i + self.length + self.horizon, target_idx])
-
+        for i in range(len(data_x) - self.length - self.horizon + 1):
+            x.append(data_x[i: i + self.length])
+            y.append(data_y[i + self.length: i + self.length + self.horizon, 0])
         return np.array(x), np.array(y)
 
-    def entrenar(self, scaled_train, scaled_test, epochs=100, batch_size=16):
-        # Se encarga de contruir y entrenar el modelo
-        x_train, y_train = self.crear_secuencias(scaled_train)
-        x_test, y_test = self.crear_secuencias(scaled_test)
+    def entrenar(self, scaled_x_train, scaled_y_train, scaled_x_test, scaled_y_test, epochs=150, batch_size=16):
+        # se encarga de construir, copilar y entrenar el modelo de forma independiente
+        x_train, y_train = self.crear_secuencias(scaled_x_train, scaled_y_train)
+        x_test, y_test = self.crear_secuencias(scaled_x_test, scaled_y_test)
 
-        n_features = scaled_train.shape[1]
-        early_stop = EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True)
+        n_features = scaled_x_train.shape[1]
 
-        # optimizador con tasa de aprendizaje conservadora para evitar NaNs
-        optimizer = Adam(learning_rate=0.001)
+        # se añaden callbacks para evitar que ocurran paradas prematuras y ajustar la tasa de aprendizaje
+        callbacks = [
+            EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True),
+            ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-5)
+        ]
 
         # modelo base: contiene SimpleRNN
-        print("Entrenamiento de baseline: SimpleRNN")
-        self.model_rnn = Sequential()
-        self.model_rnn.add(tf.keras.Input(shape=(self.length, n_features)))
-        self.model_rnn.add(SimpleRNN(32, activation = 'tanh'))
-        self.model_rnn.add(Dense(self.horizon))
-
-        self.model_rnn.compile(optimizer= Adam(learning_rate=0.001), loss='mse')
-        self.model_rnn.fit(x_train, y_train, epochs=epochs, batch_size=batch_size,
-                            validation_data=(x_test, y_test), callbacks=[early_stop], verbose=0)
+        print("Entrenando Modelo Base (SimpleRNN)...")
+        self.model_rnn = Sequential([
+            tf.keras.Input(shape=(self.length, n_features)),
+            SimpleRNN(32, activation='tanh'),
+            Dense(self.horizon)
+        ])
+        self.model_rnn.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+        self.model_rnn.fit(
+            x_train, y_train,
+            epochs=epochs,
+            batch_size=batch_size,
+            validation_data=(x_test, y_test),
+            callbacks=callbacks,
+            verbose=0
+        )
 
         # modelo principal: LSTM
-        print("Entrenamiento del modelo LSTM")
-        self.model_lstm = Sequential()
-        self.model_lstm.add(tf.keras.Input(shape=(self.length, n_features)))
-        self.model_lstm.add(LSTM(64, activation='tanh', return_sequences=True))
-        self.model_lstm.add(LSTM(32, activation='tanh'))
-        self.model_lstm.add(Dropout(0.2))
-        self.model_lstm.add(Dense(self.horizon))
+        print("Entrenando Modelo Principal (LSTM)...")
+        self.model_lstm = Sequential([
+            tf.keras.Input(shape=(self.length, n_features)),
+            LSTM(64, activation='tanh', return_sequences=True),
+            Dropout(0.1),
+            LSTM(32, activation='tanh'),
+            Dense(self.horizon)
+        ])
+        self.model_lstm.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+        history_lstm = self.model_lstm.fit(
+            x_train, y_train,
+            epochs=epochs,
+            batch_size=batch_size,
+            validation_data=(x_test, y_test),
+            callbacks=callbacks,
+            verbose=0
+        )
 
-        self.model_lstm.compile(optimizer= Adam(learning_rate=0.001), loss='mse')
-        early_stop = EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True)
-
-        history_lstm = self.model_lstm.fit(x_train, y_train, epochs=epochs, batch_size=batch_size,
-            validation_data=(x_test, y_test), callbacks=[early_stop], verbose=0)
-
-        print("Entrenamiento finalizado con éxito")
-
+        print("Entrenamiento finalizado con éxito.")
         return history_lstm
 
-    def evaluar_metricas(self, scaled_test, test_size=104):
-        # calcula las métricas rmse y mae
-        x_test, y_test_scaled = self.crear_secuencias(scaled_test)
+    def evaluar_metricas(self, scaled_x_test, scaled_y_test, test_size=104):
+        # evalúa el desempeño de los modelos entrenados frente el baseline estacional
+        # calcula las métricas de error rmse y mae
+        x_test, y_test_scaled = self.crear_secuencias(scaled_x_test, scaled_y_test)
 
-        # predicción normalizada [0, 1]
+        # realiza predicciones en escala [0, 1]
         y_pred_rnn_scaled = self.model_rnn.predict(x_test)
         y_pred_lstm_scaled = self.model_lstm.predict(x_test)
 
+        # desescalado directo sobre Y
+        y_true = self.scaler_y.inverse_transform(y_test_scaled)
+        y_pred_rnn = self.scaler_y.inverse_transform(y_pred_rnn_scaled)
+        y_pred_lstm = self.scaler_y.inverse_transform(y_pred_lstm_scaled)
 
-        # función para desescalar y obtener los casos reales de dengue
-        def desescalar(datos_scaled):
-            n_samples = datos_scaled.shape[0]
-            n_features = len(self.feature_cols)
-            dummy = np.zeros((n_samples * self.horizon, n_features))
-            dummy[:, 0] = datos_scaled.flatten()
-            inv = self.scaler.inverse_transform(dummy)
+        # se construye el de baseline estacional (semanas del año anterior)
+        y_baseline_estacional = np.zeros_like(y_true)
+        test_start_idx = len(self.df) - test_size
 
-            return inv[:, 0].reshape(n_samples, self.horizon)
+        for i in range(len(y_true)):
+            abs_idx = test_start_idx + i
+            target_historical_idx = abs_idx - 52
+            if target_historical_idx >= 0 and (target_historical_idx + self.horizon) <= len(self.df):
+                y_baseline_estacional[i] = self.df['casos_dengue'].iloc[
+                    target_historical_idx: target_historical_idx + self.horizon
+                ].values
 
-        y_true = desescalar(y_test_scaled)
-        y_pred_rnn = desescalar(y_pred_rnn_scaled)
-        y_pred_lstm = desescalar(y_pred_lstm_scaled)
-
-        # aplanamos a 1D para aplicar la limpieza de forma limpia
+        # aplanación de arreglos para evitar casos de dengues negativos
         y_true_flat = y_true.flatten()
-        y_pred_rnn_flat = y_pred_rnn.flatten()
-        y_pred_lstm_flat = y_pred_lstm.flatten()
+        y_pred_rnn_flat = np.maximum(0, y_pred_rnn.flatten())  # Evitar valores negativos en conteo
+        y_pred_lstm_flat = np.maximum(0, y_pred_lstm.flatten())
+        y_baseline_flat = y_baseline_estacional.flatten()
 
-        print("Antes de aplicar el filtro:", len(y_true_flat))
-
-        # si hay valores en 0 se van a rellenar con 0 o la media
-        y_pred_rnn_flat = np.nan_to_num(y_pred_rnn_flat, nan=0.0)
-        y_pred_lstm_flat = np.nan_to_num(y_pred_lstm_flat, nan=0.0)
-        y_true_flat = np.nan_to_num(y_true_flat, nan=0.0)
-
-        # máscara para conservar solo valores finitos válidos
-        mascara = np.isfinite(y_true_flat) & np.isfinite(y_pred_lstm_flat) & np.isfinite(y_pred_rnn_flat)
+        # se incluye un filtro para evitar posibles inconsistencias
+        mascara = np.isfinite(y_true_flat) & np.isfinite(y_pred_lstm_flat) & np.isfinite(y_pred_rnn_flat) & np.isfinite(
+            y_baseline_flat)
 
         y_true_clean = y_true_flat[mascara]
         y_pred_rnn_clean = y_pred_rnn_flat[mascara]
         y_pred_lstm_clean = y_pred_lstm_flat[mascara]
-
-        print("Después de aplicar el filtro:", len(y_true_clean))
-
-        # calculo de baseline estacional
-        # se realiza construyendo un array de baseline estacional para el test set
-        y_baseline_estacional = np.zeros_like(y_true)
-        total_len = len(self.df)
-        test_start_idx = total_len - test_size
-
-        for i in range(len(y_true)):
-            # indice de la semana actual dentro del dataframe
-            # al crear secuencias, el primer target empieza en test_start_idx
-            abs_idx = test_start_idx + self.length + i
-            #buscamos los casos de 52 semanas (1 año) antes
-            target_historical_idx = abs_idx - 52
-
-            if  i >=0:
-                # tomamos un bloque de 4 semanas de un añp atras
-                y_baseline_estacional[i] =  self.df['casos_dengue'].iloc[target_historical_idx : target_historical_idx + self.horizon].values
-            else:
-                y_baseline_estacional[i] = y_true[0] # evita que ocurran desbordamientos
-
-        y_baseline_flat = y_baseline_estacional.flatten()
         y_baseline_clean = y_baseline_flat[mascara]
 
-        if len(y_true_clean) == 0 or len(y_baseline_clean) == 0:
-            y_true_clean = y_true_flat
-            y_pred_rnn_clean = y_pred_rnn_flat
-            y_pred_lstm_clean = y_pred_lstm_flat
-            y_baseline_clean = y_baseline_flat
-
-        # calculo de las métricas de SimpleRNN
-        rmse_rnn = np.sqrt(mean_squared_error(y_true_clean, y_pred_rnn_clean))
-        mae_rnn = mean_absolute_error(y_true_clean, y_pred_rnn_clean)
-
-        # calculo de las métricas de LSTM
-        rmse_lstm = np.sqrt(mean_squared_error(y_true_clean, y_pred_lstm_clean))
-        mae_lstm = mean_absolute_error(y_true_clean, y_pred_lstm_clean)
-
-        # calculo de métricas baseline
+        # calculo de métricas finales
         rmse_base = np.sqrt(mean_squared_error(y_true_clean, y_baseline_clean))
         mae_base = mean_absolute_error(y_true_clean, y_baseline_clean)
 
-        print(" Se muestra una comparativa de las métricas")
+        rmse_rnn = np.sqrt(mean_squared_error(y_true_clean, y_pred_rnn_clean))
+        mae_rnn = mean_absolute_error(y_true_clean, y_pred_rnn_clean)
+
+        rmse_lstm = np.sqrt(mean_squared_error(y_true_clean, y_pred_lstm_clean))
+        mae_lstm = mean_absolute_error(y_true_clean, y_pred_lstm_clean)
+
+        print("\nComparativa de Métricas Reales:")
         print(f"1. Baseline Estacional (Año Anterior) -> RMSE: {rmse_base:.2f} | MAE: {mae_base:.2f}")
         print(f"2. Modelo Base (SimpleRNN)            -> RMSE: {rmse_rnn:.2f} | MAE: {mae_rnn:.2f}")
         print(f"3. Modelo Principal (LSTM)            -> RMSE: {rmse_lstm:.2f} | MAE: {mae_lstm:.2f}")
@@ -221,14 +200,9 @@ class LstmModel:
             'y_pred_lstm': y_pred_lstm
         }
 
-    def predecir_semanas(self, ultimos_datos_scaled):
-        #predice las próximas 4 semanas utilizando el modelo principal
-        batch_actual = ultimos_datos_scaled[-self.length:].reshape((1, self.length, len(self.feature_cols)))
-        pred_scaled = self.model_lstm.predict(batch_actual)[0]
-
-        # Desescalar la salida de las 4 semanas de casos de dengue
-        dummy = np.zeros((self.horizon, len(self.feature_cols)))
-        dummy[:, 0] = pred_scaled
-        pred_inversos = self.scaler.inverse_transform(dummy)[:, 0]
-
-        return pred_inversos
+    def predecir_semanas(self, ultimos_datos_scaled_x):
+        # predice las próximas 4 semanas utilizando la red LSTM
+        batch_actual = ultimos_datos_scaled_x[-self.length:].reshape((1, self.length, len(self.feature_cols)))
+        pred_scaled = self.model_lstm.predict(batch_actual)
+        pred_inversos = self.scaler_y.inverse_transform(pred_scaled)[0]
+        return np.maximum(0, pred_inversos)
